@@ -1,0 +1,14 @@
+[
+  {
+    "text": "## Hello World PDF",
+    "metadata": {
+      "source": "minimal_test.pdf",
+      "page_number": 1,
+      "category": "TEST_HEADER",
+      "ingestion_timestamp": "2026-05-18T12:59:21.054548+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  }
+]

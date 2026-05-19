@@ -1,0 +1,28 @@
+# API keys — any file matching this pattern
+api keys*
+API keys*
+*api*key*
+secrets*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv*/
+.env
+*.egg-info/
+
+# Vector indices (rebuilt from PDFs)
+vector_indices/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+*.err

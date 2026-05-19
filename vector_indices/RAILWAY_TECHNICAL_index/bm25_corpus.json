@@ -1,0 +1,379 @@
+[
+  {
+    "text": "## MINISTRY OF HOUSING AND URBAN AFFAIRS NOTIFICATION",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 1,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:44.979797+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## MINISTRY OF HOUSING AND URBAN AFFAIRS NOTIFICATION\n\nNew Delhi, the 16th December, 2020\nG.S.R. 769(E).In exercise of the powers conferred by clause (c) of sub-section (2) of section 22 and clause (e) of sub-section (2) of section 100 of the Metro Railways (Operation and Maintenance) Act, 2002  (60  of  2002)  and  in  supersession  of  the  Metro  Railways  General  Rules,  2013,  except  as  respects things done or omitted to be done, the Central Government hereby makes the following rules for regulating the operations and maintenance of metro railways in India, except the metropolitan city of Calcutta, namely:-",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 1,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.054307+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## CHAPTER I",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 1,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.054307+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## PRELIMINARY",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 1,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.054307+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## PRELIMINARY\n\nShort title and commencement----\nThese rules may be called the Metro Railways General Rules, 2020.\nThese rules shall come into force on the date of their publication in the Official Gazette.\nDefinitions --\nIn these rules, unless the context otherwise requires, --\n(i) 'accident'  means  any  occurrence  which  causes  or  has  the  potential  to  cause death  or  injury  to  staff,  passengers  or  other  persons  or  cause  damage  to  the property of the metro railway, passengers or other persons;\n(ii) 'Act' means the Metro Railways (Operation and Maintenance) Act, 2002, (60 of 2002);\n(iii) 'adequate distance' means the distance sufficient to ensure safety;\n(iv) 'approach lighting'  means  an  arrangement  in  which the lighting  of  signals  is controlled automatically by the approach of a train;\n(v) 'approved  special  instructions'  means  special  instructions  approved  by  the Commissioner;\n(vi) 'authorised  officer'  means  an  officer  who  is  duly  empowered  by  general  or special order of the metro railway administration, either by name or by virtue of his office to issue instructions;\n(vii) \"authorised  electricalperson'  means  aperson  who  is  duly  authorised  by  an officer of the metro railway administration,either by name or by designation to perform specific work on the electrical equipment or circuitry;\n(viii) 'authorisedperson'  means  anemployee  or  a  person  to  whom  a  competency certificate has been issued by the metro railway administration;\n(ix) 'authority  to  proceed'  means  the  authority  given  to  the  operator  of  a  train  or UTO train, under the system of workingto enter the block section with his train;\n(x) 'automatic fare collection system' means an automatic system for collection of fares and issuing of tickets;\n(xi) 'Automatic Mode (AM)' means the mode of operation of train under Automatic Train  Operation  where  train  is  driven  automatically  including  control  of acceleration, coasting, braking and stopping of trains;\n(xii) 'Automatic  Train Operation (ATO)'  means  a  sub-system  of continuous automatic  train  control  system,  which  automatically  controls  acceleration, coasting, braking and stopping of trains;\n(xiii) 'Automatic  Train Protection  (ATP)'  means  a sub-system of continuous automatic train control system which maintains safe train operation, including train direction, train separation, interlocking and speed enforcement;",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 2,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.060328+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "### PRELIMINARY\n\n| (xiv)    | 'Automatic Train Supervision (ATS)' means a sub-system of continuous automatic train control system which automatically monitors the entire system and directs train running so as to provide scheduled service under normal circumstances;   |\n|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|\n| (xv)     | 'auxiliary systems controller' means an authorised person responsible for the control of the auxiliary systems including tunnel ventilation system, station air conditioning and building management system of the metro railway;             |\n| (xvi)    | 'axle counter' means an electrical device which, when provided at two given points on the track, proves, by counting 'axles in' and counting 'axles out', whether the section of the track between the said two points is clear or occupied;  |\n| (xvii)   | 'baggage handling system' means a mechanised train borne and station-based system meant for transfer of passenger's baggage between stations and to the airport terminal;                                                                     |\n| (xviii)  | 'berth' means length of track nominated to be occupied by a train adjacent to a platform or in the depot;                                                                                                                                     |\n| (xix)    | 'block section' means the portion of the running line, as specified by special instructions, on to which no running train may enter, until permission to approach has been received;                                                          |\n| (xx)     | 'blue light station' means a location indicated by a blue light where a person can communicate with the OCCand arrange to disconnect traction power of a specified section, in an emergency;                                                  |\n| (xxi)    | 'building management system' means a control-panel or workstation installed at every station to monitor and control proper functioning of building services, including safety critical systems;                                               |\n| (xxii)   | 'cab signal' means visual indication displayed as speed limit and target distance on the Train Operator's console granting him the authority to proceed under automatic mode, or coded manual mode of driving;                                |\n| (xxiii)  | 'calendar day' means the period from midnight of one day tomidnight of subsequent day;                                                                                                                                                        |\n| (xxiv)   | 'car shed' or 'service depot' means an area where the metro railway trains and coaches are berthed either for repair or for any other attention including stabling;                                                                           |\n| (xxv)    | 'caution order' means an instruction given to the Train Operator to observe special precautions including speed reduction at notified locations;                                                                                              |\n| (xxvi)   | 'certificate of competency' means the certificate issued to a person after he has been examined for his knowledge of rules, regulations, procedures and manuals relevant to his duties, and found fit;                                        |\n| (xxvii)  | 'chief controller' means an authorised person in overall charge of OCC functions;                                                                                                                                                             |\n| (xxviii) | 'Coded Manual Mode or ATP mode' means the mode of operation of train under continuous automatic train control system where train is driven manually but remains subject to maximum speed determined by automatic train protection system;     |\n| (xxix)   | 'Commissioner' means the Commissioner of Metro Railway Safety appointed under section 7 of the Act;                                                                                                                                           |\n| (xxx)    | 'Communication Based Train Control (CBTC) system is a continuous, automatic train control system utilizing high-resolution train location determination, independent of track circuits; continuous, high-capacity,                            |",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 2,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.065794+00:00",
+      "is_table": true,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## PRELIMINARY",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.111706+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "bidirectional train-to-wayside data communications; and train-borne and wayside processors capable of implementing vital functions;\n(xxxi) 'competent staff' means the person competent to execute the work allotted to him and possessing valid competency;\n(xxxii) 'connections', when  used with reference to a running line, means  the arrangements used to connect such line with other lines or to cross it;\n(xxxiii) 'Continuous  Automatic  Train  Control  (CATC)  system'  means  an  automatic system of controlling and monitoring train movements continuously by means of  sub-systems,  namely,  Automatic Train Protection System, Automatic Train Operation system and Automatic Train Supervision System;\n(xxxiv) 'cross passage' means a physical connection between two single track tunnels, which is used for maintenance of the metro railway, and can also be used for evacuation of passengers and for other relief works during emergencies;\n(xxxv) 'Cut-Out-Mode' means the mode of operation of trains under the CATC system when train borne automatic train protection equipment is cutout;\n(xxxvi) 'depot  controller'  means  an  authorised  person  responsible  for  movements  of rakes  within  the  depot  area  including  interchange  of  rakes  between  the  depot and the main line;\n(xxxvii) 'departure  order  indication'  is  an  indication  on  a  display  panel  in  the  Train Operator's cab conveying authority to the Train Operatorto proceed or start his train;\n(xxxviii) 'Driverless  Train  Operation  (DTO)'  means  a  train  operation  where  a  Roving Attendant is on-board the train, but normally not in the driving cab, and his or her duties shall be defined as per special instructions;\n(xxxix) 'electrical  way  and  works'  means  the  traction  power  installations  including overhead equipment or third rail equipment and other connected works provided on the electrified sections of the metro railway;\n(xl) 'emergency' means an occurrence where there is an imminent or a continuing risk of injury and damage or major disruption to the metro railway service;\n(xli) 'emergency stop plunger' means the device, the operation of which causes the trains, within the station limits, running on automatic train protection, to come to a stop;\n(xlii) \"Emergency Train Operator (ETO)\" means an authorised person having valid certificate of competencyfor train operation, nominated by Traffic Controller to drive the train in anemergency;\n(xliii) 'engineer's possession' means a defined section of track under the sole control of an authorisedperson for a specific length of time;\n(xliv) 'engineering train unit'  means  a  train  which  is  used  for  the  maintenance  and repairs of track side fixed infrastructure;\n(xlv) 'facing  and  trailing  points'  means  points  which  are  facing  or  trailing  in accordance with the direction a train or vehicle moves over them and the points are said to be facing points when by their operation, train approaching them can be directly diverted from the line upon which it is running;\n(xlvi) 'feeding post' means a supply control post in overhead traction power system, where the incoming feeder lines from grid sub-station are terminated;\n(xlvii) 'fixed  signal'  means  a  signal  of  station  at  a  fixed  location  controlling  the movement of trains and forming part of the signalling system;\n(xlviii) 'fouling  mark'  means  the  mark  at  which  the  infringement  of  fixed  standard dimensions occurswhere two lines cross or join one another;\n(xlix) 'headway' means the time interval between two successive trains;\n(l) 'incident' means any occurrence which causes or has potential to cause delay or disruption to passenger services;\n(li) 'inspection car' means  a self-propelled vehicle, which  is used for the inspection, maintenance and repairs of the equipment of the metro railway;\n(lii) 'insulated third rail joint' means a special joint for the purpose of sectioning the third rail being powered from different traction sub-stations;\n(liii) 'interlocking'  means  an  arrangement  of  signals,  points  and  other  appliances, operated  from  a  panel  or  work-station,so  interconnected  by  mechanical  or electrical or electronic locking, or any combination thereof, that their operationmust takeplace in proper sequence to ensure safety;",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.111706+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "(li) 'inspection car' means  a self-propelled vehicle, which  is used for the inspection, maintenance and repairs of the equipment of the metro railway;\n(lii) 'insulated third rail joint' means a special joint for the purpose of sectioning the third rail being powered from different traction sub-stations;\n(liii) 'interlocking'  means  an  arrangement  of  signals,  points  and  other  appliances, operated  from  a  panel  or  work-station,so  interconnected  by  mechanical  or electrical or electronic locking, or any combination thereof, that their operationmust takeplace in proper sequence to ensure safety;\n(liv) 'irrevocable  emergency  brake' meansan  emergency  brake  when  applied, intentionally or otherwise,  remains applied until the train speed comes to zero and the cause of application of the emergency brake is removed or reset;\n(lv) 'isolation'  means  an  arrangement  secured  by  the  setting  of  points,  or  other approved  means,  to  protect  the  line  so  isolated  from  obstruction  due  to movement on other connected line or lines;\n(lvi) 'jumper cable' means a cable provided with clips for use as a temporary electric connection to bridge a gap in a running rail, cable or pipe;\n(lvii) 'local  control'  means  the  assumption  of  the  responsibilities  of  the  Traffic Controllerfor a specific station by a person who is authorised to do so for the time being;\n(lviii) 'metro  railway  employee'  means  an  employee  of  the  metro  railway  duly qualified,  possessing  a  valid  certificate  of  competency  and  nominated  to undertake and perform the duties entrusted to him;\n(lix) 'moving  block'  means  the  block  system  where  the  blocks  are  in  real  time defined by signalling and train control system as safe zones around each train.\n(lx) 'neutral  section'  means  a  short  section  of  insulated  and  dead  overhead equipment, which separates the areas fed by adjacent sub-station or feeding post for AC traction power system;\n(lxi) 'normal direction of traffic' means traffic moving on the left side track;\n(lxii) 'obstruction' with its cognate expressions includes a train, vehicle or obstacle on or fouling a line or any condition which is dangerous to trains;\n(lxiii) 'Operations Control Centre (OCC)' means the organisation in overall charge of controlling the movement of trains on the main line and includes limited backup facilities,  where  provided which may be located at different locations to meet contingencies and termed as backup control centre;\n(lxiv) 'overhead equipment' means the electrical conductors over the track together with  their  associated  fittings,  insulators  and  other  attachments  by  means  of which they are suspended and registered in position for the purpose of electrical traction;\n(lxv) 'parted',  when  used  with  the  reference  of  train  divided,  means  the  train  is physically divided into two parts and is not coupled;\n(lxvi) 'passenger train' means a train intended for the movement of passengers and their baggage;\n(lxvii) \"Permanent  Speed  Restriction  (PSR)\"means  the  speed  restriction  which  is perpetually imposed and incorporated through CATC system or as per special instruction;\n(lxviii) 'permission to approach' means permission given for a train to enter the block section;\n(lxix) 'Platform Screen Doors' means a system of automated doors synchronized with the train doors which are provided at the platform edge to isolate passengers on platform from track;\n(lxx) 'platform supervisor booth' means  a monitoring cabin on platform for supervisor;\n(lxxi) 'point and trap indicators' means appliances fitted to and working with points to indicate the position in which they are set;\n(lxxii) 'power  block'  means  withdrawing  traction    power  supply  from  a  particular section;\n(lxxiii) 'proceed code' means the automatic train protection code other than zero speed code on the Train Operator's console which indicates the target speed;\n(lxxiv) \"Railway Board\" means the Railway Board as empowered under section 2 of the Indian Railway Board Act, 1905 (4 of 1905);",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.111706+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "(lxx) 'platform supervisor booth' means  a monitoring cabin on platform for supervisor;\n(lxxi) 'point and trap indicators' means appliances fitted to and working with points to indicate the position in which they are set;\n(lxxii) 'power  block'  means  withdrawing  traction    power  supply  from  a  particular section;\n(lxxiii) 'proceed code' means the automatic train protection code other than zero speed code on the Train Operator's console which indicates the target speed;\n(lxxiv) \"Railway Board\" means the Railway Board as empowered under section 2 of the Indian Railway Board Act, 1905 (4 of 1905);\n(lxxv) 'receiving  sub-station'  means  an  electric  sub-station  where  electric  power supply is received from grid sub-station and transformed to appropriate voltage for distribution;\n(lxxvi) 'Restricted Manual (RM) Mode' means a driving mode where train is driven manually and is subjected to automatic train protection in respect of maximum speed limit only;\n(lxxvii) 'rolling stock controller' means an authorised person responsible for the control of the rolling stock systems of the metro railway;\n(lxxviii) 'rolling stock supervisor' means an authorised person duly qualified to examine trains and certify their fitness for safe running;\n(lxxix) \"Roving  Attendant\"  means  an  authorised  person  responsible  for  performing required functions in driverless or unattended train operation;\n(lxxx) 'running  line'  means  the  track  used  for  running  trains  through  and  between stations  and  includes  connections,  if  any,  used  by  a  train  when  entering  or leaving stations;\n(lxxxi) 'running train' means a train which has started on authority to proceed but has not completed its journey;\n(lxxxii) 'Run-on-Sight (ROS) Mode' means a driving mode where the train is driven manually  and  is  subject  to  ATPrestriction  in  respect  of  speed  only  until ATPtrack  indications  are  recognised  after  which  it  automatically  changes  to coded manual mode;\n(lxxxiii) 'SCADA'  means  supervisory  control  and  data  acquisition  system  for  the purpose  of  remote  monitoring  and  control  of  all traction  power  supply, installations and auxiliary systems;\n(lxxxiv) 'schedule' means a schedule annexed to these rules;\n(lxxxv) 'secure a train'means no motoring command is given and brake is applied so as to ensure no movement of the train;\n(lxxxvi) 'short  circuiting  device'  means  such  devices  provided  for  safety  reasons  on each  station  located  in  auxiliary  sub-station  or  Traction  sub-station  or  station\ncontrol room to temporarily short circuit the running rails to earth in case the rise of running rail potential exceeds the prescribed limits;\n(lxxxvii) 'shunting' means the movement of a coach or coaches with or without traction motorsor  of  any  other  self-propelled  vehicle,  for  the  purpose  of  attaching, detaching or transfer or for any other purpose;\n(lxxxviii) 'signal'  means  an  indication  given  to  a  Train  Operator  for  controlling  the movement of the train;\n(lxxxix) 'signal supervisor' means  an authorised person to examine signalling system and certify signalling system fitness for the safe running of trains;\n(xc) 'signalling  system  controller'  means  an  authorised  person  responsible  for  the control of signalling system maintenance and coordination with other controllers;\n(xci) 'sleep mode' is the state where all systems of the train are switched off except the sub-system which initiates the wake-up test;\n(xcii) 'sleep  process',means  the  process  initiated  by  UTMS  either    manually  or automatically to switch off all systems of the train except the sub-system which initiates the wake-up;\n(xciii) 'special instruction' means  instruction  issued  from  time  to  time by  the authorised officer in respect of particular cases or special circumstances;\n(xciv) 'staff protection key' means a key used by an authorised person for going to a particular track section for inspection, maintenance, cleaning or any other work;",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.111706+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "(xcii) 'sleep  process',means  the  process  initiated  by  UTMS  either    manually  or automatically to switch off all systems of the train except the sub-system which initiates the wake-up;\n(xciii) 'special instruction' means  instruction  issued  from  time  to  time by  the authorised officer in respect of particular cases or special circumstances;\n(xciv) 'staff protection key' means a key used by an authorised person for going to a particular track section for inspection, maintenance, cleaning or any other work;\n(xcv) 'staff special key' means a key provided to open Manual Secondary Door from platform side which is used by the maintenance staff to access the track side;\n(xcvi) 'station'  means  any  place  on  a  line  of  the  metro  railway  at  which  passenger traffic is dealt with;\n(xcvii) 'Station  Controller'  means  the  person  on  duty  who  is  for  the  time  being responsible for the working of the station and traffic within station limits and includes the Assistant Station Controller or any person who is for the time being in independent charge of the working of such station and traffic;\n(xcviii) 'station  control  room'  means  the  room  where  station  control  panel  or  workstation is located;\n(xcix) 'station limits' means the limits or chainages as defined in the station working orders;\n(c) 'supply  control  post'  means  an  assembly  of  interrupters,  isolator  switches, remote control  equipment  and  other  apparatus  provided  for  controlling  power supply to overhead equipment or third rail traction equipment, and it includes feeding posts, sectioning and paralleling posts, and sub- sectioning posts in the case of overhead equipment;\n(ci) 'system  of  working'  means  one  or  more  of  the  systems  specified  in  Chapter VIII for the time being for the working of trains;\n(cii) 'target distance' means the farthest point to which the train may safely proceed;\n(ciii) 'target speed' means the speed displayed on the Train Operator's console which the train must not exceed;\n(civ) 'telecom  system  controller'  means  an  authorised  person  responsible  for  the control of telecommunication systems;\n(cv) 'temporary earth' means an additional earthing device which is applied after the issue of a 'permit-to-work' and removed prior to the cancellation of the 'permitto-work';\n(cvi) 'Temporary  Speed  Restriction  (TSR)'means  the  speed  restriction,  in  no  case greater than PSR, imposed by an authorized person to limit speed of trains over a section of trackin accordance with special instructions.\n(cvii) 'terminal station' means the station at the end of a line;\n(cviii) 'test track' means the portion of the track in the depot used for testing of a train;\n(cix) 'third  rail'  means  a  rail  on  insulators  laid  by  the  side  of  running  rails  for conduction of electric current to the train through current collector fitted on the train for its running on the main line and depots in a DC traction system;\n(cx) 'track and structure or works engineer' means an authorised person responsible for  the  construction  or  maintenance  of  points,  underground  structure,  surface structure, bridges or other works connected therewith;\n(cxi) 'track  circuit'  means  an  electrical  circuit  provided  to  detect  the  presence  or absence of a vehicle on a portion of track, the rails of the track forming part of the circuit;\n(cxii) 'traction', when used with the reference of train, means the act of drawing or pulling of a vehicle along a surface by motor power;\n(cxiii) 'tractionpower' means a traction power system working on 25000 volts single phase,  50Hz  alternating  current  or  750  volt  or  some  other  voltage  of  Direct Current  with  Overhead  Equipment  System,  or  on  750  volts  or  some  other voltage of direct current with third rail system;\n(cxiv) 'traction feeder breaker' means a circuit breaker controlling the traction power supply to the third rail or overhead equipment;",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.112668+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "(cxii) 'traction', when used with the reference of train, means the act of drawing or pulling of a vehicle along a surface by motor power;\n(cxiii) 'tractionpower' means a traction power system working on 25000 volts single phase,  50Hz  alternating  current  or  750  volt  or  some  other  voltage  of  Direct Current  with  Overhead  Equipment  System,  or  on  750  volts  or  some  other voltage of direct current with third rail system;\n(cxiv) 'traction feeder breaker' means a circuit breaker controlling the traction power supply to the third rail or overhead equipment;\n(cxv) 'traction  power  controller'  means  an  authorised  person  responsible  for  the control  of  the  traction  and  auxiliary  power  distribution  systems  of  the  metro railway;\n(cxvi) 'Traffic  Controller'  means  an  authorised  person  on  duty  in  the  OCC  who  is responsible for running of trains on a section of metro railway;\n(cxvii) 'traffic hours' means the period between the time of the start of the running of the first scheduled train and termination of the last scheduled train;\n(cxviii) 'train'  means  an  engine  with  or  without  vehicle  attached  or  self-propelled vehicle with or without a trailer which cannot be readily lifted off the track;\n(cxix) 'Train Control and Monitoring system (TCMS)' or 'Train Integrated Management System (TIMS)' means a system designed to provide information and  exercise  control  on  a  variety  of  functions  related  to  movement  of  metro trains, like traction, power, braking, air conditioning, etc;\n(cxx) 'train divided', means that the train integrity is lost and train may be incomplete or not coupled or electrically uncoupled;\n(cxxi) 'train integrity', means the train is complete and coupled;\n(cxxii) 'Train  Operator'  means the  driver  of  the  train  responsible  for  movement  and control of the train;\n(cxxiii) 'train  radio'  means  a  wireless  telephone  message  communication  system between the cab of the train, stations and the OCC;\n(cxxiv) 'tunnel ventilation section' means a minimum length of a tunnel section of an up or down  line capable of being mechanically  ventilated using tunnel ventilation fans;\n(cxxv) 'Unattended Train Operation (UTO)'  means a train operation with no regulatory  requirement  of  Roving  Attendanton-board  the  train  andemergency\nhandling  or  abnormal  situation  shall  be  handled  by  system  or  through  special instruction;\n(cxxvi) 'Unattended Train Management System (UTMS)' means metro rail transportation  system  with  self-propelled  vehicle  and  operated  on  the  guided way, which monitors and controls, starting and stopping of the trains, operation of train doors and platform screen doors, without any regulatory requirement of the  staff  present  in  the  train  anddetection  and  management  of  emergency situations  as  provided  by  system  and/or  staff  in  OCC  including  aRoving Attendant and station staff;\n(cxxvii) 'virtual  signal'  is  an  intermediate  entry  or  exit  location  as  displayed  on interlocking and automatic train supervision monitors whichmay be used where required for dividing routes between two fixed signalsand not a physical signal and only controls trains with automatic train protection;\n(cxxviii) 'wake-up-test'  means  the  test  performed  by  UTMS  to  ensure  that  required functions of the train are working correctly;\n(cxxix) ' wake-up  process',means  process  initiated  by  UTMS  either  manually  or automatically to switch on all systems of the train and to initiate the wake-up;\n(cxxx) 'work train' means a departmental train intended solely for execution of works, including maintenance workson the metro railway network.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.112668+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "(cxxviii) 'wake-up-test'  means  the  test  performed  by  UTMS  to  ensure  that  required functions of the train are working correctly;\n(cxxix) ' wake-up  process',means  process  initiated  by  UTMS  either  manually  or automatically to switch on all systems of the train and to initiate the wake-up;\n(cxxx) 'work train' means a departmental train intended solely for execution of works, including maintenance workson the metro railway network.\nWords  and  expressions  used  in  these  rules  and  not  defined  but  defined  in  the  Act,  the Metro  Railways  (Operation  and  Maintenance)  Act,  2002  (60  of  2002),  or  the  Metro Railways  (Construction  of  Works)  Act,  1978  (33  of  1978),  shall  have  the  meanings respectively assigned to them in those Acts.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.112668+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## CHAPTER II",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.112668+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## RULES APPLYING TO AUTHORISED PERSONS GENERALLY",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 8,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.112668+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## RULES APPLYING TO AUTHORISED PERSONS GENERALLY\n\nSupply of copies of rules --The metro railway administration shall supply a copy of these rules and amendments made therein to--\n(a) (i) operation control centre;\n(ii) each station;\n(iii) each  rake  maintenance  depot,  traction  depot,  permanent  way  depot  and  signal depot; and\n(iv) such other offices as may be specified under special instructions; and\n(b) each authorised  person  on  whom  responsibility  has  been  placed  under  these  rules,  or  of such portions of rules as relate to his duties.\nUpkeep of the copy of the rules --Every authorised person who has been supplied with a copy of these rules shall, -\n(a) keep it posted with all corrections;\n(b) produce the same on demand by any of his superiors;\n(c) obtain a new copy from his superior in case his copy is lost or defaced; and\n(d) ensure that the staff working under him are supplied with all corrections or amendments and that they comply with the provisions of these rules.\nKnowledge of rules and issue of certificate of competency --\nKnowledge of rules --Everyauthorised person shall --\n(a) be fully conversant with the rules relating to his duties;\n(b) pass the examinations as specified by the authorised officer of the metro railway administration;\n(c) satisfy  himself  that  the  staff  working  under  him  are  conversant  with  the  rules relating to their duties and obtain a written assurance from them.\nIssue of certificate of competency --No authorised person shall be assigned any duty under these rules unless he has passed the prescribed examination as regards his technical ability and  skills  and  knowledge  of  rules,  regulations,  procedures  and  manuals  relevant  to  his duties and has been issued, after being found fit, a certificate of competency by an officer specifically nominated by the authorised officer, in this regard.\nAssistance in observance of rules -- Every authorised person shall render assistance in carrying out  these  rules  and  report  promptly  any  breach  thereof,  which  may  come  to  his  notice,  to  his superior officer and other authority concerned.\nObedience to rules and orders --Every authorised person shall observe and obey-\n(a)         all rules and special instructions; and\n(b)         all lawful orders given by his superior officials.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.115696+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## 8. Prevention of trespass, damage or loss --",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.115696+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## 8. Prevention of trespass, damage or loss --\n\nEvery authorised person shall be responsible for the security and protection of the property of metro railway under his charge or possession.\nEveryauthorised person shall endeavour to prevent--\n(a) trespass on metro railway premises;\n(b) theft, damage or loss of metro railway property;\n(c) injury to passengers, others and himself; and\n(d) fire and other unsafe incidents in metro railway premises.\nAttendance to duty --Every authorised person shall be on duty at such times and places and for such period as may be fixed by the metro railway administration and shall also attend at any other time and place where his services may be required.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.115696+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## 10. Absence from duty --",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.115696+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## 10. Absence from duty --\n\nno authorised person shall, without prior permission of his superior officer, absent himself from  duty  or  alter  his  appointed  hours  of  attendance  or  exchange  duty  with  any  other authorised person or leave his charges of duty unless properly relieved;\nin case any authorised person, while on duty, desires to absent himself from duty on the ground of illness, he shall immediately report the matter to his superior officer and shall not leave his duty unless an authorised person has been placed incharge thereof.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.116690+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## 11. Taking alcoholic drink, sedative, narcotic, stimulant drug or preparation --",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.116690+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## 11. Taking alcoholic drink, sedative, narcotic, stimulant drug or preparation --\n\nAn  authorised  person  shall  not  take  or  use  any  alcoholic  drink,  sedative,  narcotic  or stimulant drug or preparation within eight hours before the commencement of his duty or take or use any such drink, drug or preparation while on duty.\nNo  authorised  person,  while  on  duty,  shall  be  in  a  state  of  intoxication  or  in  a  state  in which,  by  reason  of  his  having  taken  or  used  any  alcoholic  drink,  sedative,  narcotic  or stimulant drug or preparation, his capacity to perform his duties is impaired.\nAn authorised person while on duty, shall not smoke or chew tobacco.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.117655+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## 12. Conduct of authorised persons --",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 9,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.117655+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## 12. Conduct of authorised persons --\n\nEvery authorised person shall, --\n(a) wear the uniform and badge as prescribed by the metro railway administration and be neat and tidy in his appearance while on duty;\n(b) be prompt, civil and courteous;\n(c) not solicit or accept illegal gratification;\n(d) give all reasonable assistance and be careful to give correct information to the public;\n(e) make complete and truthful statement at all times in all reports pertaining to his duty; and\n(f) when asked, give his name and designation without hesitation.\nDuty for ensuring safety --\nEvery authorised person shall--\n(a) see  that  every  effort  is  made  for  ensuring  safety  of  the  public  and  of  his  fellow person;\n(b) promptly, report to his superior any occurrence likely to affect the safe and proper working of the metro railway which may come to his notice; and\n(c) render  spontaneously  all  possible  assistance  when  called  upon  to  do  so  by  the appropriate official in case of an accident or obstruction.\nEveryauthorised person who observes --\n(a) anything wrong with a train; or\n(b) any obstruction, failure  or threatened failure  of  any  part of the  way  or  works  or overhead  electric  equipment  or  third  rail  electric  equipment  including  power supply installation; or\n(c) any defective signal; or\n(d) any unusual circumstances such as fire, smoke, flood accident or other dangerous condition  on  any  part  of  the  system  likely  to  interfere  with  the  safe  running  of trains,  or  the  safety  of  the  public,  shall  take  immediate  steps,  to  prevent  the accident  and  promptly  report  the  matter  to  the  OCC  or  the  nearest  Station Controller.\nStandard time --The working of trains between stations on metro railway shall be regulated by the Indian Standard Time.\nAccess control --\nAll authorised persons, in addition to identity cards, shall be provided with access control cards or authorisation signed by their controlling officers to allow them to visit places of metro railway system with restricted access in line of their duties.\nThe following places in particular shall have restricted access in addition to other places as notified from time to time by the order of authorised officer, namely: -\n(a) guideways, viaducts and tunnels;\n(b) receiving sub-station;\n(c) traction substation;\n(d) auxiliary substation;\n(e) signalling equipment room;\n(f) telecommunication equipment room;\n(g) uninterrupted power supply room;\n(h) station control room;\n(i) operation control centre;\n(j) back-up control centre, where provided;\n(k) depot control centre;\n(l) Demarcated UTO territory in Depot.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.121643+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## 16. General --",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.121643+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## 16. General --\n\nThe following signalsshall be used for controlling the movements of trains on the metro railway, namely: -\n(a) cab signals;\n(b) fixed signals and equipments;\n(c) hand signals;\n(d) Virtual signals.\nThe aspects displayed by fixed signals are the same by day and the night, in open and in tunnels.\nA fixed signal shall be placed where practicable, on the left hand side of the track to which it  refers,  unless  authorised  otherwise  under special instructions and shall be visible from such a distance as shall enable a Train Operator to brake a train from twenty-five kilometer per  hour  speed  to  stop  before  reaching  the  fixed  signal  and  a  repeater  signal  shall  be provided at locations where due to obstructions such visibility is not available, except in depot: Provided that where high speed cut out mode is provided, this speed shall be forty kilometer per hour.\nThe signal  sighting  distance  as  specified  in  sub-rule  (3)  shall  be  specified  under  special instructions.\nAxle counters or track circuits, where provided, to assist operation of non-ATP equipped trains or trains with inoperative on-board ATP equipment.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.122641+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## 17. Description of signals --",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.122641+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## 17. Description of signals --\n\nCab Signals -\n(i) Train  movements  on  running  tracks  and  in  depot  (if  equippedwith  ATP)  shall normally be governed by the automatic train protection system which displays to the Train Operator in the operating console, -\n(a) actual speed of the train;\n(b) the maximum permitted speed at each point of travel;\n(c) the distance the train is currently authorised to travel (where provided);\n(d) system alarms; and\n(e) messages.\n(ii) in  casethe  target  speed  indication  and  the  target  distance  indication,  where provided,  are  greater  than  zero,  the  indication  is  referred  to  as  'PROCEED' indication;\n(iii) in  caseeither  of  these  indications  is  '0',  the  indication  is  referred  to  as  'STOP' indication;\n(iv) the Train Operator is authorised to drive his train upto the indicated speed as far as authority has been given for such purpose.",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.123637+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## (2) Fixed Signals --",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.123637+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## (2) Fixed Signals --\n\n(i) on main lines, fixed signals are colour light signals, either showing two aspects or three aspects;\n(ii) two aspects fixed signals, where provided shall be capable of showing a 'red' or a 'white or violet' aspect, as under, -",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.123637+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  },
+  {
+    "text": "## CHAPTER III",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.123637+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## SIGNALS AND CONTROL",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 11,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.123637+00:00",
+      "is_table": false,
+      "is_table_continuation": false,
+      "is_section_header": true
+    }
+  },
+  {
+    "text": "## SIGNALS AND CONTROL\n\n(a) a 'red' aspect indicates that a train must be brought to Stop short of the signalwhen driven in RM or ROS or cut out mode;\n(b) a 'white or violet' aspect indicates that the route is set and locked but may not be fully clear upto the next fixed signal and a train operating under cab signals  may  proceed  under  the  authority  of  the  cab  signals  but  a  train operating  on  the  sole  authority  of  line  side  signals  must  stop  and  seek instructions from the Traffic Controller;\n(iii) three aspect signals, where provided shall be capable of showing a 'red', 'white or violet' or 'green' aspect, as under, -\n(a) a 'red' aspect indicates that a train must be brought to Stop short of the signalwhen driven in RM or ROS or cut out mode;\n(b) a 'white or violet' aspect indicates that the route is set and locked but may not be fully clear upto the next fixed signal and a train operating under cab signals  may  proceed  under  the  authority  of  the  cab  signals  but  a  train operating  on  the  sole  authority  of  line  side  signals  must  stop  and  seek instructions from the Traffic Controller;\n(c) a 'green' aspect indicates that the route is cleared to the next fixed signal and the train may proceed as far as the next fixed signal;\n(iv) when a fixed signal is not in use, the aspect shall be covered and the cover shall display two crossed white bars on a black background, the bars being not less than thirty centimetres long and ten centimetres wide;\n(v) fixed signals on main line may be kept blank when cab signals are available under ATP or ATO or DTO or UTO mode of operation and should be lit for trains under RM or ROS or cut-out mode of operation.\nFixed Signals in Depots --\n(i) in depots, fixed signals may be colour light or position light type. Colour light type using red and yellow aspects should be used in the manner as specified below, -\n(a) a  'red'  aspect  indicates  that  a train  must  be  brought  to  stop  short of the signalwhen driven in RM or ROS or cut out mode;\n(b) a  'yellow'  aspect  indicates  that  the  route  is  set,  locked  and  clear  and  a train may proceed as far as the line is clear and the Train Operator must keep a look out for any obstruction;\n(ii) in position light type signalling, -\n(a) two white lights displayed horizontally shall mean that a train must stop;\n(b) two white lights displayed at an angle shall mean that a train may proceed as far as the line is clear and the Train Operator must keep a lookout for the obstruction;\n(iii) the  depots  and  stabling  lines  shall  be  isolated  from  the  running  line  through approved means.\nHand Signals --\n(i) hand signals shall normally be used only for the shunting of work train in depotor at the site of work or in extreme emergency;\n(ii) any light other than 'green' or any object waived violently shall be interpreted as a stop signal;\n(iii) 'STOP' shall be indicated by, -\n(a) a red lamp;\n(b) raising of both arms above the head;",
+    "metadata": {
+      "source": "railway_technical_manual.pdf",
+      "page_number": 12,
+      "category": "RAILWAY_TECHNICAL",
+      "ingestion_timestamp": "2026-05-18T13:05:45.125633+00:00",
+      "is_table": false,
+      "is_table_continuation": false
+    }
+  }
+]
