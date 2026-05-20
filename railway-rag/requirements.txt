@@ -10,6 +10,7 @@ langchain-text-splitters==1.1.2
 tiktoken==0.13.0
 faiss-cpu==1.13.2
 flashrank==0.2.10
+google-api-core==2.30.3
 rank-bm25==0.2.2
 groq==0.37.1
 google-genai==1.75.0

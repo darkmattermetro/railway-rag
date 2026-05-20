@@ -51,7 +51,7 @@ GROQ_TIMEOUT: int = 45
 GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
 RERANKER_MODEL: str = "ms-marco-MiniLM-L-12-v2"
 RERANKER_TOP_N: int = 15
-INDEX_DIR: Path = Path("vector_indices")
+INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
 _ENC = tiktoken.get_encoding("cl100k_base")
 
 # ----------------------------------------------------------------------------
