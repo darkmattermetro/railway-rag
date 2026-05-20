@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
 
 logger = logging.getLogger(__name__)
 
@@ -17,35 +18,16 @@ logger = logging.getLogger(__name__)
 def build_and_save_index(
     all_chunks: list[Document],
     category: str,
-    google_api_key: str,
 ) -> Path:
-    from google.api_core.exceptions import ResourceExhausted
     from langchain_community.vectorstores import FAISS
-    from langchain_google_genai import GoogleGenerativeAIEmbeddings
-    from local_builder import EMBEDDING_MODEL, EMBEDDING_RATE_LIMIT_WAIT_S
+    from langchain_huggingface import HuggingFaceEmbeddings
+    from local_builder import EMBEDDING_MODEL
 
     # Rule 1.2: import error propagates naturally to caller's RuntimeError handler
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=EMBEDDING_MODEL, google_api_key=google_api_key
-    )
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
-    vector_store: FAISS | None = None
-    for attempt in range(2):
-        try:
-            vector_store = FAISS.from_documents(all_chunks, embeddings)
-            break
-        except ResourceExhausted:
-            if attempt == 0:
-                logger.warning(
-                    "event=embedding_rate_limit attempt=1 waiting=%ds",
-                    EMBEDDING_RATE_LIMIT_WAIT_S,
-                )
-                time.sleep(EMBEDDING_RATE_LIMIT_WAIT_S)
-            else:
-                raise RuntimeError("Embedding rate limit hit again. Aborting index build.")
-
-    if not vector_store:
-        raise RuntimeError("Vector store was not built.")
+    # Create vector store from documents
+    vector_store = FAISS.from_documents(all_chunks, embeddings)
 
     index_dir = Path("vector_indices") / f"{category}_index"
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -79,21 +61,37 @@ def process_pdf(
     filename: str,
     category: str,
 ) -> tuple[list[Document], float, bool]:
+    from datetime import datetime, timezone
+
+    import pypdf
     from docling.datamodel.accelerator_options import AcceleratorDevice
     from docling.datamodel.base_models import InputFormat
     from docling.document_converter import DocumentConverter, PdfFormatOption
-    from local_builder import build_pipeline_options, _DEVICE, extract_chunks
+    from local_builder import (
+        build_pipeline_options,
+        _DEVICE,
+        extract_chunks,
+        perform_ocr_fallback,
+    )
 
     tmp_path = pdf_path
     t_start = time.monotonic()
     file_chunks: list[Document] = []
     success = False
 
+    # Get total page count to detect dropped pages later
+    total_pages = 0
     try:
-        gpu_options = build_pipeline_options(device=_DEVICE)
+        reader = pypdf.PdfReader(tmp_path)
+        total_pages = len(reader.pages)
+    except Exception:
+        pass
+
+    try:
+        pipeline_opts = build_pipeline_options(device=_DEVICE)
         converter = DocumentConverter(
             format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=gpu_options)
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_opts)
             }
         )
         result = converter.convert(tmp_path)
@@ -136,6 +134,54 @@ def process_pdf(
             logger.error(
                 "event=pdf_failed source=%s error=%s", filename, str(e)
             )
+
+    else:
+        # Page-level recovery: reprocess any pages silently dropped by docling
+        if total_pages > 0:
+            pages_in_chunks: set[int] = set()
+            for chunk in file_chunks:
+                pn = chunk.metadata.get("page_number")
+                if pn is not None:
+                    pages_in_chunks.add(int(pn))
+
+            missing = sorted(set(range(1, total_pages + 1)) - pages_in_chunks)
+            if missing:
+                logger.warning(
+                    "event=missing_pages source=%s total=%d present=%d missing_count=%d",
+                    filename,
+                    total_pages,
+                    len(pages_in_chunks),
+                    len(missing),
+                )
+                for page_no in missing:
+                    try:
+                        recovered = perform_ocr_fallback(tmp_path, page_no, filename)
+                        if recovered and recovered.strip():
+                            metadata = {
+                                "source": Path(filename).name,
+                                "page_number": page_no,
+                                "category": category,
+                                "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
+                                "is_table": False,
+                                "is_table_continuation": False,
+                                "is_recovered": True,
+                            }
+                            file_chunks.append(
+                                Document(page_content=recovered.strip(), metadata=metadata)
+                            )
+                            logger.info(
+                                "event=page_recovered source=%s page=%d text_len=%d",
+                                filename,
+                                page_no,
+                                len(recovered),
+                            )
+                    except Exception as page_e:
+                        logger.warning(
+                            "event=page_recovery_failed source=%s page=%d error=%s",
+                            filename,
+                            page_no,
+                            str(page_e),
+                        )
 
     finally:
         gc.collect()

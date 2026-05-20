@@ -150,12 +150,9 @@ def main():
     
     logger.info(f"Found {len(pdf_paths)} PDF files to process")
 
-    # Get Google API key from environment variable
-    google_api_key = os.environ.get('GOOGLE_API_KEY')
-    if not google_api_key:
-        logger.error("GOOGLE_API_KEY environment variable is required.")
-        print("Error: GOOGLE_API_KEY environment variable is required.")
-        sys.exit(1)
+    # No longer need Google API key for local embeddings
+    # Keeping this section for compatibility but not requiring the key
+    google_api_key = os.environ.get('GOOGLE_API_KEY', None)
 
     # Processing loop
     all_chunks: list[Document] = []
@@ -226,7 +223,7 @@ def main():
     print("\nEmbedding documents and building FAISS index...")
     from ingest import build_and_save_index
     try:
-        index_dir = build_and_save_index(all_chunks, safe_category, google_api_key)
+        index_dir = build_and_save_index(all_chunks, safe_category)
         logger.info(
             "event=session_complete total_chunks=%d total_elapsed_s=%.2f files=%d",
             len(all_chunks),

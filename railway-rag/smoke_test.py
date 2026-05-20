@@ -12,7 +12,7 @@ from pathlib import Path
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_index(index_dir: Path, api_key: str) -> FAISS:
+def load_index(index_dir: Path) -> FAISS:
     """
     Load FAISS index from disk (saved directly in <category>_index/).
     """
@@ -36,10 +36,7 @@ def load_index(index_dir: Path, api_key: str) -> FAISS:
         if actual.hexdigest() != expected:
             raise RuntimeError(f"FAISS index integrity mismatch at {index_dir}")
 
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001",
-        google_api_key=api_key,
-    )
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
 
     # The builder saves index.faiss/index.pkl directly in index_dir (not a subfolder)
     try:
@@ -75,12 +72,11 @@ def load_bm25_corpus(index_dir: Path) -> list[Document]:
 def run_smoke_test(
     index_dir: Path,
     query: str,
-    api_key: str,
 ) -> int:
     """Run the smoke test."""
     try:
         logger.info("Starting smoke test with query: '%s'", query)
-        faiss_index = load_index(index_dir, api_key)
+        faiss_index = load_index(index_dir)
 
         results = faiss_index.similarity_search(query, k=3)
 
@@ -146,7 +142,7 @@ def main() -> None:
         print(f"Error: Index directory '{index_dir}' does not exist")
         sys.exit(1)
 
-    exit_code = run_smoke_test(index_dir, args.query, api_key)
+    exit_code = run_smoke_test(index_dir, args.query)
     sys.exit(exit_code)
 
 

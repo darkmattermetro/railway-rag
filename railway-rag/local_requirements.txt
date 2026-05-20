@@ -13,5 +13,6 @@ langchain-google-genai==4.2.2
 flashrank==0.2.10
 tiktoken==0.13.0
 pyarrow==18.1.0
+sentence-transformers==2.5.1
 # Torch pinned to CUDA 12.4 version - install separately from CUDA index
 # torch==2.5.1+cu124  -- use --index-url https://download.pytorch.org/whl/cu124

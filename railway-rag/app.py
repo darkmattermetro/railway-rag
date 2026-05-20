@@ -20,14 +20,14 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
 from google.api_core.exceptions import GoogleAPIError
 from groq import APIStatusError, APITimeoutError, RateLimitError
 from utils import (
     apply_source_diversity,
     deduplicate_chunks,
-    extract_technical_identifiers,
     parse_citations,
     RETRIEVAL_K,
     TOKEN_BUDGET,
@@ -45,12 +45,12 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 # Module-level constants
 # ----------------------------------------------------------------------------
-COOLDOWN_SECONDS: float = 2.0
-GROQ_PRIMARY_MODEL: str = "llama-3.1-8b-instant"
-GROQ_TIMEOUT: int = 25
-GEMINI_FALLBACK_MODEL: str = "gemini-2.5-flash"
+COOLDOWN_SECONDS: float = 1.0
+GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
+GROQ_TIMEOUT: int = 45
+GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
 RERANKER_MODEL: str = "ms-marco-MiniLM-L-12-v2"
-RERANKER_TOP_N: int = 5
+RERANKER_TOP_N: int = 15
 INDEX_DIR: Path = Path("vector_indices")
 _ENC = tiktoken.get_encoding("cl100k_base")
 
@@ -62,7 +62,7 @@ def _token_length(text: str) -> int:
 
 
 @st.cache_resource
-def load_vector_index(index_path: Path, gemini_api_key: str) -> FAISS:
+def load_vector_index(index_path: Path) -> FAISS:
     """Load FAISS index from disk with integrity check."""
     hash_path = index_path / "index.hash"
     if hash_path.exists():
@@ -72,9 +72,7 @@ def load_vector_index(index_path: Path, gemini_api_key: str) -> FAISS:
         actual.update((index_path / "index.pkl").read_bytes())
         if actual.hexdigest() != expected:
             raise RuntimeError(f"FAISS index integrity mismatch at {index_path}")
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001", google_api_key=gemini_api_key
-    )
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
     vector_store = FAISS.load_local(
         str(index_path),
         embeddings,
@@ -120,52 +118,6 @@ def discover_indices() -> list[Path]:
     return sorted(indices)
 
 
-def condense_query(user_query: str, primary_llm: ChatGroq, fallback_llm: ChatGoogleGenerativeAI) -> str:
-    """Shorten query while preserving intent, then append technical codes.
-    
-    Uses the same failover pattern as §3.13 — this is the ONLY other location
-    where we need LLM calls before the main generation. Broad exception catching
-    is NOT permitted here, so we use targeted exceptions only.
-    """
-    # Extract technical codes BEFORE condensation
-    technical_codes: list[str] = extract_technical_identifiers(user_query)
-
-    # Short condensation prompt
-    condensation_prompt: str = (
-        "Rewrite the following technical railway query concisely (max 20 words), "
-        "preserving all technical terms and identifiers:\n\n"
-        f"{user_query}"
-    )
-    
-    # Try primary LLM with targeted exceptions only
-    condensed: str = user_query  # fallback to original if both fail
-    try:
-        result = primary_llm.invoke([HumanMessage(content=condensation_prompt)])
-        condensed = result.content.strip()
-        logger.info("event=query_condensation_success model=%s", GROQ_PRIMARY_MODEL)
-    except (RateLimitError, APIStatusError, APITimeoutError) as e:
-        logger.warning(
-            "event=query_condensation_primary_failed error=%s — attempting fallback",
-            str(e),
-        )
-        try:
-            result = fallback_llm.invoke([HumanMessage(content=condensation_prompt)])
-            condensed = result.content.strip()
-            logger.info("event=query_condensation_fallback_success model=%s", GEMINI_FALLBACK_MODEL)
-        except (GoogleAPIError, TimeoutError, APIStatusError) as fb_e:
-            logger.error(
-                "event=query_condensation_fallback_failed err_type=%s err=%s — using original query",
-                type(fb_e).__name__,
-                str(fb_e),
-            )
-
-    # Append identifiers back to prevent loss
-    if technical_codes:
-        condensed = condensed + " " + " ".join(technical_codes)
-
-    return condensed
-
-
 # ----------------------------------------------------------------------------
 # Main application
 # ----------------------------------------------------------------------------
@@ -192,18 +144,92 @@ def main() -> None:
     # UI Layout
     # --------------------------------------------------------------------
     st.set_page_config(
-        page_title="Railway RAG Retriever",
-        page_icon="🚂",
+        page_title="DMRC Document Search",
+        page_icon="📄",
         layout="wide",
     )
-    st.title("🚂 Railway Technical Document Retrieval")
-    st.markdown("---")
+
+    st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+    * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+
+    .dmrc-header {
+        background: #003366;
+        padding: 1.5rem 2rem 0.8rem 2rem;
+        border-radius: 0 0 10px 10px;
+        margin: -0.5rem -1rem 1.5rem -1rem;
+    }
+    .dmrc-header h1 {
+        color: #FFFFFF;
+        font-size: 1.6rem;
+        font-weight: 600;
+        margin: 0 0 0.2rem 0;
+        letter-spacing: -0.02em;
+    }
+    .dmrc-header .subtitle {
+        color: rgba(255,255,255,0.7);
+        font-size: 0.85rem;
+        font-weight: 400;
+        margin: 0;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid rgba(255,255,255,0.15);
+    }
+
+    .stChatInput { border: 2px solid #D0D8E0; border-radius: 8px; transition: border-color 0.2s; }
+    .stChatInput:focus, .stChatInput:focus-within { border-color: #003366; box-shadow: 0 0 0 2px rgba(0,51,102,0.1); }
+    .stChatInput input { font-size: 0.9rem; }
+
+    .stChatFloatingInputContainer { border-radius: 8px; }
+
+    [data-testid="stChatMessage"] {
+        border-left: 3px solid #D0D8E0;
+        padding-left: 0.75rem;
+        margin: 0.5rem 0;
+        background: #FFFFFF;
+        border-radius: 0 6px 6px 0;
+    }
+    [data-testid="stChatMessageContent"] { font-size: 0.95rem; line-height: 1.6; color: #1A1A2E; }
+
+    .st-expander {
+        border: 1px solid #E0E4E8;
+        border-radius: 6px;
+        margin: 0.25rem 0;
+        transition: border-color 0.2s;
+        background: #FFFFFF;
+    }
+    .st-expander:hover { border-color: #003366; }
+    .st-expander summary { font-size: 0.9rem; font-weight: 500; color: #003366; padding: 0.25rem 0; }
+
+    hr { margin: 1rem 0; border-color: #E0E4E8; }
+
+    .status-msg {
+        color: #5A6A7E;
+        font-size: 0.85rem;
+        font-style: italic;
+        margin: 0.5rem 0;
+    }
+
+    [data-testid="stSidebar"] { background: #FFFFFF; border-right: 1px solid #E0E4E8; }
+    [data-testid="stSidebar"] .stSelectbox label { font-size: 0.85rem; font-weight: 500; color: #1A1A2E; }
+
+    .stAlert { border-left: 3px solid #003366; background: #F0F4F8; border-radius: 4px; }
+</style>
+""", unsafe_allow_html=True)
+
+    st.markdown("""
+<div class="dmrc-header">
+    <h1>DMRC Document Search Engine</h1>
+    <p class="subtitle">Delhi Metro Rail Corporation — Intelligent Document Search</p>
+</div>
+""", unsafe_allow_html=True)
 
     # --------------------------------------------------------------------
     # Index selection sidebar
     # --------------------------------------------------------------------
     with st.sidebar:
-        st.header("📚 Document Index")
+        st.header("Document Collection")
         available_indices = discover_indices()
 
         if not available_indices:
@@ -215,9 +241,9 @@ def main() -> None:
 
         index_names: list[str] = [p.name for p in available_indices]
         selected_index_name: str = st.selectbox(
-            "Select document collection",
+            "Collection",
             index_names,
-            help="Choose which ingested document set to search",
+            help="Choose which document set to search",
         )
         selected_index_path: Path = INDEX_DIR / selected_index_name
 
@@ -227,23 +253,15 @@ def main() -> None:
             st.session_state.current_index = selected_index_name
 
         # Load index and BM25
-        with st.spinner("Loading vector index..."):
-            vector_store = load_vector_index(selected_index_path, gemini_api_key)
+        with st.spinner("Loading..."):
+            vector_store = load_vector_index(selected_index_path)
             faiss_docs_count: int = vector_store.index.ntotal
             logger.info("event=index_loaded index=%s faiss_docs=%d", selected_index_name, faiss_docs_count)
 
         bm25_retriever, bm25_available = load_bm25_corpus(selected_index_path)
 
         if not bm25_available:
-            st.warning(
-                "BM25 corpus not found — using FAISS-only retrieval. "
-                "Run local_builder.py to rebuild the full index."
-            )
-
-        st.divider()
-        st.caption(f"FAISS contains {faiss_docs_count} document chunks")
-        if bm25_available:
-            st.caption("✓ BM25 index available for hybrid search")
+            logger.warning("event=bm25_missing index=%s", selected_index_name)
 
     # --------------------------------------------------------------------
     # Chat history display
@@ -255,7 +273,7 @@ def main() -> None:
     # --------------------------------------------------------------------
     # Query handling
     # --------------------------------------------------------------------
-    user_query: str = st.chat_input("Ask a technical question about railway systems...")
+    user_query: str = st.chat_input("Ask a question about DMRC documents...")
 
     if user_query:
         t_query_start: float = time.monotonic()
@@ -276,24 +294,21 @@ def main() -> None:
         # --------------------------------------------------------------------
         # LLM Setup (for query condensation and final generation)
         # --------------------------------------------------------------------
-        primary_llm = ChatGroq(
-            model=GROQ_PRIMARY_MODEL,
+        primary_llm = ChatGoogleGenerativeAI(
+            model=GEMINI_PRIMARY_MODEL,
+            temperature=0,
+            google_api_key=gemini_api_key,
+        )
+        fallback_llm = ChatGroq(
+            model=GROQ_FALLBACK_MODEL,
             timeout=GROQ_TIMEOUT,
             temperature=0,
             api_key=groq_api_key,
         )
-        fallback_llm = ChatGoogleGenerativeAI(
-            model=GEMINI_FALLBACK_MODEL,
-            temperature=0,
-            google_api_key=gemini_api_key,
-        )
-
-        # Condense query using the two-LLM failover pattern
-        condensed: str = condense_query(user_query, primary_llm, fallback_llm)
 
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
-            response_placeholder.markdown("🔍 **Retrieving relevant documents...**")
+            response_placeholder.markdown('<div class="status-msg">Searching documents...</div>', unsafe_allow_html=True)
 
             # ----------------------------------------------------------------
             # Setup retrievers
@@ -303,7 +318,7 @@ def main() -> None:
             if bm25_available:
                 ensemble_retriever = EnsembleRetriever(
                     retrievers=[faiss_retriever, bm25_retriever],
-                    weights=[0.5, 0.5],
+                    weights=[0.3, 0.7],
                 )
                 active_retriever = ensemble_retriever
             else:
@@ -324,7 +339,7 @@ def main() -> None:
             # ----------------------------------------------------------------
             # Retrieval
             # ----------------------------------------------------------------
-            retrieved_docs: list[Document] = compression_retriever.invoke(condensed)
+            retrieved_docs: list[Document] = compression_retriever.invoke(user_query)
             raw_count: int = len(retrieved_docs)
 
             # ----------------------------------------------------------------
@@ -386,11 +401,18 @@ def main() -> None:
             # Build prompt
             # ----------------------------------------------------------------
             SYSTEM_PROMPT: str = (
-                "You are a risk-averse technical rail analyst.\n"
-                "Answer ONLY using the provided context blocks.\n"
-                "If the information does not exist in context, respond:\n"
-                "'Information not found within local documents.'\n\n"
+                "You are a technical rail analyst for DMRC.\n"
+                "Answer using the provided context blocks as your primary source.\n"
+                "Search across all available context blocks — they may come from "
+                "multiple documents. Synthesize information from all relevant sources.\n\n"
+                "If information is not directly in context, you may make reasonable "
+                "inferences based on related content. Indicate when you are inferring.\n\n"
                 "Never fabricate metrics, speeds, telemetry, or calculations.\n\n"
+                "Examples:\n"
+                "- Acceptable: 'The signal head is approximately 2.5m high (inferred "
+                "from mast dimensions on page 8).'\n"
+                "- NOT acceptable: Making up a speed value, clearance point, or "
+                "measurement not found anywhere in the provided documents.\n\n"
                 "Synthesize the information. Do NOT repeat the same point "
                 "multiple times — if multiple chunks contain the same "
                 "information, state it once.\n\n"
@@ -404,7 +426,8 @@ def main() -> None:
             user_prompt: str = (
                 f"Context:\n{context_str}\n\n"
                 f"Question: {user_query}\n\n"
-                "Provide a precise answer based only on the context above."
+                "Provide a precise answer based on the context above. "
+                "Use all relevant sources. Where you infer, note it."
             )
 
             messages = [
@@ -415,7 +438,7 @@ def main() -> None:
             # ----------------------------------------------------------------
             # LLM Generation with failover
             # ----------------------------------------------------------------
-            response_placeholder.markdown("🤖 **Generating answer...**")
+            response_placeholder.markdown('<div class="status-msg">Generating answer...</div>', unsafe_allow_html=True)
             full_response: str = ""
             t_llm_start: float = time.monotonic()
 
@@ -424,13 +447,13 @@ def main() -> None:
                 full_response = result.content
                 logger.info(
                     "event=llm_primary_success model=%s elapsed_s=%.2f",
-                    GROQ_PRIMARY_MODEL,
+                    GEMINI_PRIMARY_MODEL,
                     time.monotonic() - t_llm_start,
                 )
-            except (RateLimitError, APIStatusError, APITimeoutError) as e:
+            except (GoogleAPIError, TimeoutError, APIStatusError) as e:
                 logger.warning(
                     "event=llm_primary_failed model=%s error=%s — attempting fallback",
-                    GROQ_PRIMARY_MODEL,
+                    GEMINI_PRIMARY_MODEL,
                     str(e),
                 )
                 st.warning("Primary LLM unavailable — switching to fallback model.")
@@ -439,13 +462,13 @@ def main() -> None:
                     full_response = result.content
                     logger.info(
                         "event=llm_fallback_success model=%s elapsed_s=%.2f",
-                        GEMINI_FALLBACK_MODEL,
+                        GROQ_FALLBACK_MODEL,
                         time.monotonic() - t_llm_start,
                     )
-                except (GoogleAPIError, TimeoutError, APIStatusError) as fb_exc:
+                except (RateLimitError, APIStatusError, APITimeoutError) as fb_exc:
                     logger.error(
                         "event=llm_fallback_failed model=%s err_type=%s err=%s",
-                        GEMINI_FALLBACK_MODEL,
+                        GROQ_FALLBACK_MODEL,
                         type(fb_exc).__name__,
                         str(fb_exc),
                     )
@@ -460,7 +483,7 @@ def main() -> None:
             # Display the answer
             response_placeholder.markdown(display_response)
 
-            # Render LLM-tagged citations
+            # Render LLM-tagged citations with expandable chunk text
             seen_citations: set[str] = set()
             for idx in chunk_indices:
                 if 0 <= idx < len(reranked_docs):
@@ -470,10 +493,11 @@ def main() -> None:
                     citation_key: str = f"{source}:{page}"
                     if citation_key not in seen_citations:
                         seen_citations.add(citation_key)
-                        st.markdown(
-                            f"📄 **{source}** — Page {page}",
-                            help=f"Chunk {idx} contributed to this answer",
-                        )
+                        with st.expander(
+                            f"**{source}** — Page {page}",
+                            expanded=False,
+                        ):
+                            st.text(doc.page_content)
 
             logger.info(
                 "event=citations_rendered count=%d indices=%s",
@@ -481,37 +505,8 @@ def main() -> None:
                 chunk_indices,
             )
 
-            # ----------------------------------------------------------------
-            # Fallback citations: always show top retrieved sources
-            # ----------------------------------------------------------------
-            st.markdown("#### Retrieved Sources")
-            fallback_seen: set[str] = set()
-            for idx, doc in enumerate(reranked_docs):
-                source = doc.metadata.get("source", "unknown")
-                page = str(doc.metadata.get("page_number", "?"))
-                citation_key = f"{source}:{page}"
-                if citation_key not in fallback_seen:
-                    fallback_seen.add(citation_key)
-                    cited_marker = " ✓" if idx in chunk_indices else ""
-                    st.markdown(
-                        f"📄 **{source}** — Page {page}{cited_marker}",
-                        help=f"Retrieved chunk {idx}",
-                    )
-
-            # ----------------------------------------------------------------
-            # Display metrics
-            # ----------------------------------------------------------------
-            elapsed_total: float = time.monotonic() - t_query_start
-            st.caption(
-                f"📊 Retrieved {raw_count} → deduped {deduped_count} → "
-                f"diverse {diverse_count} → reranked {reranked_count} | "
-                f"Context: {len(context_parts)} chunks | "
-                f"{total_tokens} tokens | ⏱️ {elapsed_total:.2f}s"
-            )
-
             logger.info(
-                "event=query_complete elapsed_s=%.2f tokens=%d citations=%d",
-                elapsed_total,
+                "event=query_complete tokens=%d citations=%d",
                 total_tokens,
                 len(seen_citations),
             )

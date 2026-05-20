@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 logger = logging.getLogger(__name__)
 
 RETRIEVAL_K: int = 20
-TOKEN_BUDGET: int = 7_000
+TOKEN_BUDGET: int = 80_000
 
 
 def _word_overlap_ratio(text1: str, text2: str) -> float:

@@ -12,8 +12,23 @@ venv*/
 .env
 *.egg-info/
 
-# Vector indices (rebuilt from PDFs)
-vector_indices/
+# Vector indices (rebuilt from PDFs) — keep only MRGR_index
+vector_indices/*
+!vector_indices/MRGR_index/
+
+# CodeGraph AI cache
+.codegraph/
+
+# Backups
+*.original
+*_backup_*
+
+# Large test fixtures
+test_pdfs/test_real.pdf
+
+# Misc generated files
+constraints.txt
+requirements_fixed.txt
 
 # IDE
 .idea/

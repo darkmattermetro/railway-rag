@@ -34,9 +34,9 @@ from docling.datamodel.pipeline_options import (
     PdfPipelineOptions,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from google.api_core.exceptions import GoogleAPIError
 from langchain_core.documents import Document
 from langchain_text_splitters import MarkdownTextSplitter
+from sentence_transformers import SentenceTransformer
 
 from ingest import process_pdf
 
@@ -65,12 +65,11 @@ MAX_FILE_SIZE_BYTES: int = 200 * 1024 * 1024
 CATEGORY_MAX_LEN: int = 64
 OCR_MIN_TEXT_LEN: int = 20
 OCR_GARBAGE_RATIO_THRESHOLD: float = 0.4
-CHUNK_SIZE_TOKENS: int = 1000
-CHUNK_OVERLAP_TOKENS: int = 150
-CHUNK_SIZE_CHARS: int = 4000
-CHUNK_OVERLAP_CHARS: int = 600
-EMBEDDING_MODEL: str = "models/gemini-embedding-001"
-EMBEDDING_RATE_LIMIT_WAIT_S: int = 60
+CHUNK_SIZE_TOKENS: int = 512
+CHUNK_OVERLAP_TOKENS: int = 200
+CHUNK_SIZE_CHARS: int = 2000
+CHUNK_OVERLAP_CHARS: int = 300
+EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"
 
 # Determine device profile once at startup
 _DEVICE: AcceleratorDevice = (
@@ -87,6 +86,9 @@ _DEVICE: AcceleratorDevice = (
 # Per strict exception rules, do not catch errors here.
 # A failure to load the tokenizer is a fatal setup error.
 _enc = tiktoken.get_encoding("cl100k_base")
+
+# Initialize embedding model - do not catch errors here as it's a fatal setup error
+_embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 
 
 def _token_length(text: str) -> int:
@@ -119,15 +121,14 @@ except TypeError:
 
 def build_pipeline_options(
     device: AcceleratorDevice,
-    ocr_batch: int = 4,
-    layout_batch: int = 2,
+    ocr_batch: int = 1,
+    layout_batch: int = 1,
     table_batch: int = 1,
-    num_threads: int = 4,
+    num_threads: int = 2,
 ) -> PdfPipelineOptions:
-    """Builds Docling pipeline options safe for GTX 1650 and CPU."""
+    """Builds Docling pipeline options safe for limited memory environments."""
     if device == AcceleratorDevice.CPU:
-        # Constrain CPU threads to avoid RAM pressure on smaller instances
-        num_threads = 2
+        num_threads = 1
 
     return PdfPipelineOptions(
         accelerator_options=AcceleratorOptions(
@@ -381,9 +382,6 @@ def main() -> None:
 
     # --- UI & Input Validation ---
     st.sidebar.header("Configuration")
-    google_api_key = st.sidebar.text_input(
-        "Google API Key", type="password", help="Required for embeddings."
-    )
     category_name = st.sidebar.text_input(
         "Category Name",
         help="A name for this document set, e.g., 'Class_390_Maintenance'.",
@@ -396,10 +394,6 @@ def main() -> None:
 
     if not st.sidebar.button("Build Index"):
         st.info("Configure settings in the sidebar and click 'Build Index'.")
-        st.stop()
-
-    if not google_api_key:
-        st.error("Google API Key is required.")
         st.stop()
     if not category_name or not category_name.strip():
         st.error("Category Name is required.")
@@ -479,7 +473,7 @@ def main() -> None:
             )
             if success:
                 doc_processed_successfully = True
-        except (RuntimeError, GoogleAPIError) as e:
+        except RuntimeError as e:
             logger.error("event=pdf_failed source=%s err_type=%s err=%s", filename, type(e).__name__, str(e))
             st.error(f"Failed to process {filename}: {e}")
         finally:
@@ -537,7 +531,7 @@ def main() -> None:
     with st.spinner("Embedding documents and building FAISS index..."):
         from ingest import build_and_save_index
         try:
-            index_dir = build_and_save_index(all_chunks, safe_category, google_api_key)
+            index_dir = build_and_save_index(all_chunks, safe_category)
             logger.info(
                 "event=session_complete total_chunks=%d total_elapsed_s=%.2f files=%d",
                 len(all_chunks),
