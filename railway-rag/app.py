@@ -451,11 +451,20 @@ def main() -> None:
                     time.monotonic() - t_llm_start,
                 )
             except (GoogleAPIError, TimeoutError, APIStatusError) as e:
-                logger.warning(
-                    "event=llm_primary_failed model=%s error=%s — attempting fallback",
-                    GEMINI_PRIMARY_MODEL,
-                    str(e),
-                )
+                # Check if it's a quota/rate limit error
+                error_str = str(e).lower()
+                if "resource_exhausted" in error_str or "429" in error_str or "quota" in error_str:
+                    logger.warning(
+                        "event=llm_quota_exceeded model=%s error=%s — switching to fallback due to quota",
+                        GEMINI_PRIMARY_MODEL,
+                        str(e)[:200],  # Truncate long error messages
+                    )
+                else:
+                    logger.warning(
+                        "event=llm_primary_failed model=%s error=%s — attempting fallback",
+                        GEMINI_PRIMARY_MODEL,
+                        str(e),
+                    )
                 st.warning("Primary LLM unavailable — switching to fallback model.")
                 try:
                     result = fallback_llm.invoke(messages)
