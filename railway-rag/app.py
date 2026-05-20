@@ -494,6 +494,7 @@ def main() -> None:
 
             # Render LLM-tagged citations with expandable chunk text
             seen_citations: set[str] = set()
+            ref_num = 1  # Reference counter starting at 1
             for idx in chunk_indices:
                 if 0 <= idx < len(reranked_docs):
                     doc = reranked_docs[idx]
@@ -503,10 +504,12 @@ def main() -> None:
                     if citation_key not in seen_citations:
                         seen_citations.add(citation_key)
                         with st.expander(
-                            f"**{source}** — Page {page}",
+                            f"**Refer {ref_num}**",
                             expanded=False,
                         ):
+                            st.caption(f"{source} — Page {page}")
                             st.text(doc.page_content)
+                        ref_num += 1
 
             logger.info(
                 "event=citations_rendered count=%d indices=%s",
