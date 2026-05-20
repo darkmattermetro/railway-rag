@@ -4,7 +4,7 @@ Model Selector for intelligent LLM fallback with rotation
 import time
 import logging
 from typing import List, Optional
-from langchain_google_genai import ChatGoogleGenerativeAI, ChatGoogleGenerativeAIError
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from groq import RateLimitError, APIStatusError, APITimeoutError
 from google.api_core.exceptions import GoogleAPIError
@@ -181,7 +181,7 @@ class ModelSelector:
                     f"event=llm_primary_success model={model_name} elapsed_s={elapsed:.2f}"
                 )
                 return result
-            except Exception as e:
+            except (GoogleAPIError, ResourceExhausted, ServiceUnavailable) as e:
                 last_error = e
                 logger.warning(
                     f"event=llm_primary_failed model={model_name} provider=gemini error={type(e).__name__}"
@@ -193,10 +193,18 @@ class ModelSelector:
                     logger.info(f"event=llm_quota_exceeded model={model_name} provider=gemini")
                     continue  # Try next model
                 else:
-                    # For non-quota errors, we might still want to try other models
-                    # but let's be conservative and try next model anyway for robustness
+                    # For non-quota Google API errors, still try next model for robustness
                     self._mark_model_exhausted(model_name, e)
                     continue
+            except Exception as e:
+                # Catch any other unexpected exceptions
+                last_error = e
+                logger.warning(
+                    f"event=llm_primary_failed model={model_name} provider=gemini error={type(e).__name__}"
+                )
+                # Treat unexpected errors as potential quota issues to be safe
+                self._mark_model_exhausted(model_name, e)
+                continue
         
         # Try Groq models if Gemini models failed or unavailable
         for attempt in range(len(self.groq_models)):
@@ -215,7 +223,7 @@ class ModelSelector:
                     f"event=llm_fallback_success model={model_name} elapsed_s={elapsed:.2f}"
                 )
                 return result
-            except Exception as e:
+            except (RateLimitError, APIStatusError, APITimeoutError) as e:
                 last_error = e
                 logger.warning(
                     f"event=llm_fallback_failed model={model_name} provider=groq error={type(e).__name__}"
@@ -227,9 +235,18 @@ class ModelSelector:
                     logger.info(f"event=llm_quota_exceeded model={model_name} provider=groq")
                     continue  # Try next model
                 else:
-                    # For non-quota errors, still try next model
+                    # For non-quota Groq errors, still try next model for robustness
                     self._mark_model_exhausted(model_name, e)
                     continue
+            except Exception as e:
+                # Catch any other unexpected exceptions
+                last_error = e
+                logger.warning(
+                    f"event=llm_fallback_failed model={model_name} provider=groq error={type(e).__name__}"
+                )
+                # Treat unexpected errors as potential quota issues to be safe
+                self._mark_model_exhausted(model_name, e)
+                continue
         
         # If we get here, all models are exhausted or failed
         logger.error("event=llm_all_models_exhausted")
