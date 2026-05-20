@@ -380,7 +380,7 @@ def main() -> None:
                 if total_tokens + chunk_tokens > TOKEN_BUDGET:
                     remaining: int = TOKEN_BUDGET - total_tokens
                     truncated_text: str = _ENC.decode(_ENC.encode(doc.page_content)[:remaining])
-                    context_parts.append(f"[CHUNK {i}]\n{truncated_text}")
+                    context_parts.append(truncated_text)
                     total_tokens += remaining
                     logger.info(
                         "event=token_budget_truncated chunk=%d remaining=%d total=%d",
@@ -389,7 +389,7 @@ def main() -> None:
                         total_tokens,
                     )
                     break
-                context_parts.append(f"[CHUNK {i}]\n{doc.page_content}")
+                context_parts.append(doc.page_content)
                 total_tokens += chunk_tokens
 
             logger.info(
