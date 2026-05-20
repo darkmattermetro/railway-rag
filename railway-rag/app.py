@@ -20,7 +20,7 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI, ChatGoogleGenerativeAIError
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from google.api_core.exceptions import GoogleAPIError
@@ -32,6 +32,7 @@ from utils import (
     RETRIEVAL_K,
     TOKEN_BUDGET,
 )
+from model_selector import ModelSelector, LLMExhaustedError
 
 # ----------------------------------------------------------------------------
 # Logging configuration
@@ -294,16 +295,16 @@ def main() -> None:
         # --------------------------------------------------------------------
         # LLM Setup (for query condensation and final generation)
         # --------------------------------------------------------------------
-        primary_llm = ChatGoogleGenerativeAI(
-            model=GEMINI_PRIMARY_MODEL,
-            temperature=0,
-            google_api_key=gemini_api_key,
-        )
-        fallback_llm = ChatGroq(
-            model=GROQ_FALLBACK_MODEL,
-            timeout=GROQ_TIMEOUT,
-            temperature=0,
-            api_key=groq_api_key,
+        # Get model lists from secrets with fallbacks to original values
+        gemini_models = st.secrets.get("GEMINI_MODELS", [GEMINI_PRIMARY_MODEL])
+        groq_models = st.secrets.get("GROQ_MODELS", [GROQ_FALLBACK_MODEL])
+        
+        # Initialize model selector
+        llm_selector = ModelSelector(
+            gemini_models=gemini_models,
+            groq_models=groq_models,
+            gemini_api_key=gemini_api_key,
+            groq_api_key=groq_api_key
         )
 
         with st.chat_message("assistant"):
@@ -436,53 +437,30 @@ def main() -> None:
             ]
 
             # ----------------------------------------------------------------
-            # LLM Generation with failover
+            # LLM Generation with intelligent fallback and model rotation
             # ----------------------------------------------------------------
             response_placeholder.markdown('<div class="status-msg">Generating answer...</div>', unsafe_allow_html=True)
             full_response: str = ""
             t_llm_start: float = time.monotonic()
 
             try:
-                result = primary_llm.invoke(messages)
+                result = llm_selector.invoke_with_fallback(messages)
                 full_response = result.content
-                logger.info(
-                    "event=llm_primary_success model=%s elapsed_s=%.2f",
-                    GEMINI_PRIMARY_MODEL,
-                    time.monotonic() - t_llm_start,
+                # Note: Success logging is now handled inside ModelSelector.invoke_with_fallback
+            except LLMExhaustedError as e:
+                logger.error(
+                    "event=llm_all_providers_exhausted error=%s",
+                    str(e)[:200],
                 )
-            except (GoogleAPIError, TimeoutError, APIStatusError) as e:
-                # Check if it's a quota/rate limit error
-                error_str = str(e).lower()
-                if "resource_exhausted" in error_str or "429" in error_str or "quota" in error_str:
-                    logger.warning(
-                        "event=llm_quota_exceeded model=%s error=%s — switching to fallback due to quota",
-                        GEMINI_PRIMARY_MODEL,
-                        str(e)[:200],  # Truncate long error messages
-                    )
-                else:
-                    logger.warning(
-                        "event=llm_primary_failed model=%s error=%s — attempting fallback",
-                        GEMINI_PRIMARY_MODEL,
-                        str(e),
-                    )
-                st.warning("Primary LLM unavailable — switching to fallback model.")
-                try:
-                    result = fallback_llm.invoke(messages)
-                    full_response = result.content
-                    logger.info(
-                        "event=llm_fallback_success model=%s elapsed_s=%.2f",
-                        GROQ_FALLBACK_MODEL,
-                        time.monotonic() - t_llm_start,
-                    )
-                except (RateLimitError, APIStatusError, APITimeoutError) as fb_exc:
-                    logger.error(
-                        "event=llm_fallback_failed model=%s err_type=%s err=%s",
-                        GROQ_FALLBACK_MODEL,
-                        type(fb_exc).__name__,
-                        str(fb_exc),
-                    )
-                    st.error("Both LLM providers failed. Please try again later.")
-                    st.stop()
+                st.error("All LLM providers are temporarily unavailable due to quota limits. Please try again later.")
+                st.stop()
+            except Exception as e:
+                logger.error(
+                    "event=llm_unexpected_error error=%s",
+                    str(e)[:200],
+                )
+                st.error("An unexpected error occurred. Please try again later.")
+                st.stop()
 
             # ----------------------------------------------------------------
             # Citation synthesis (programmatic, not trusting LLM)
