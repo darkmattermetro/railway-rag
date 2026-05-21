@@ -1,18 +1,20 @@
-#!venv311/Scripts/python.exe
+#!python
 """
-Railway RAG Smoke Test - Standalone CLI validation script
+Railway RAG Smoke Test — Standalone CLI validation.
+
+Loads a FAISS index + BM25 corpus, runs a query, prints top results.
+No API key required; uses BAAI/bge-base-en-v1.5 embeddings (downloaded once).
 """
 import argparse
 import hashlib
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
 from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
+from rank_bm25 import BM25Okapi
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,129 +23,83 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_index(index_dir: Path) -> FAISS:
-    """
-    Load FAISS index from disk (saved directly in <category>_index/).
-    """
-    logger.info("Loading FAISS index from %s", index_dir)
-
+def _verify_integrity(index_dir: Path) -> None:
     hash_path = index_dir / "index.hash"
-    if hash_path.exists():
-        expected = hash_path.read_text().strip()
-        actual = hashlib.sha256()
-        actual.update((index_dir / "index.faiss").read_bytes())
-        actual.update((index_dir / "index.pkl").read_bytes())
-        if actual.hexdigest() != expected:
-            raise RuntimeError(f"FAISS index integrity mismatch at {index_dir}")
+    if not hash_path.exists():
+        return
+    expected = hash_path.read_text().strip()
+    actual = hashlib.sha256()
+    actual.update((index_dir / "index.faiss").read_bytes())
+    actual.update((index_dir / "index.pkl").read_bytes())
+    if actual.hexdigest() != expected:
+        raise RuntimeError(f"FAISS integrity mismatch at {index_dir}")
+
+
+def run_smoke_test(index_dir: Path, query: str, k: int = 3) -> int:
+    logger.info("Smoke test — index=%s query='%s'", index_dir, query)
+    _verify_integrity(index_dir)
 
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
+    vector_store = FAISS.load_local(
+        str(index_dir), embeddings, allow_dangerous_deserialization=True
+    )
+    logger.info("FAISS loaded — %d vectors", vector_store.index.ntotal)
 
-    # The builder saves index.faiss/index.pkl directly in index_dir (not a subfolder)
-    try:
-        faiss_index = FAISS.load_local(
-            str(index_dir),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-        logger.info("Successfully loaded FAISS index with %d vectors", faiss_index.index.ntotal)
-        return faiss_index
-    except RuntimeError as e:
-        logger.error("Failed to load FAISS index: %s", e)
-        raise RuntimeError(f"Could not load FAISS index: {e}") from e
-
-
-def load_bm25_corpus(index_dir: Path) -> list[Document]:
-    """
-    Load BM25 corpus from JSON file (bm25_corpus.json in index_dir).
-    """
+    # BM25
     corpus_path = index_dir / "bm25_corpus.json"
-    corpus_data = json.loads(corpus_path.read_text(encoding="utf-8"))
-    documents = [
-        Document(
-            page_content=item.get("text", item.get("page_content", "")),
-            metadata=item.get("metadata", {}),
-        )
-        for item in corpus_data
-    ]
-    logger.info("Loaded %d documents from BM25 corpus", len(documents))
-    return documents
+    bm25 = None
+    if corpus_path.exists():
+        with open(corpus_path, "r", encoding="utf-8") as f:
+            bm25 = BM25Okapi(json.load(f))
+        logger.info("BM25 loaded — %d docs", bm25.corpus_size)
 
-
-def run_smoke_test(
-    index_dir: Path,
-    query: str,
-) -> int:
-    """Run the smoke test."""
-    try:
-        logger.info("Starting smoke test with query: '%s'", query)
-        faiss_index = load_index(index_dir)
-
-        results = faiss_index.similarity_search(query, k=3)
-
-        if not results:
-            logger.warning("No results returned for query: '%s'", query)
-            print("No results found for the query.")
-            return 0
-
-        print(f"\nTop {len(results)} results for query: '{query}'")
-        print("=" * 60)
-
-        for i, doc in enumerate(results, 1):
-            source = doc.metadata.get("source", "Unknown")
-            page_number = doc.metadata.get("page_number", "Unknown")
-            content_preview = doc.page_content[:200].replace('\n', ' ')
-
-            print(f"\nResult {i}:")
-            print(f"  Source: {source}")
-            print(f"  Page: {page_number}")
-            print(f"  Content: {content_preview}...")
-
-        logger.info("Smoke test completed successfully")
+    results = vector_store.similarity_search(query, k=k)
+    if not results:
+        print("No results found.")
         return 0
 
-    except RuntimeError as e:
-        logger.error("Smoke test failed: %s", e, exc_info=True)
-        print(f"Error: {e}")
-        return 1
+    print(f"\nTop {len(results)} results for: '{query}'")
+    print("=" * 60)
+    for i, doc in enumerate(results, 1):
+        src = doc.metadata.get("source", "?")
+        pg = doc.metadata.get("page_number", "?")
+        preview = doc.page_content[:200].replace("\n", " ")
+        print(f"\n  [{i}] {src} — p.{pg}")
+        print(f"       {preview}...")
+
+    logger.info("Smoke test PASSED")
+    return 0
 
 
 def main() -> None:
-    """Main entry point for the smoke test."""
     parser = argparse.ArgumentParser(description="Railway RAG smoke test")
     parser.add_argument(
         "--index_dir",
         type=str,
         required=True,
-        help="Directory containing FAISS index and BM25 corpus (e.g., vector_indices/RAILWAY_TECHNICAL_index)",
+        help="e.g. vector_indices/RAILWAY_TECHNICAL_index",
     )
     parser.add_argument(
         "--query",
         type=str,
-        required=True,
-        help="Search query to test",
+        default="What is the maximum permitted speed?",
+        help="Search query",
     )
     parser.add_argument(
-        "--google_api_key",
-        type=str,
-        default=None,
-        help="Google API key for embeddings (defaults to GOOGLE_API_KEY env var)",
+        "--k",
+        type=int,
+        default=3,
+        help="Number of results to return",
     )
 
     args = parser.parse_args()
-
-    api_key = args.google_api_key or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        print("Error: Google API key required via --google_api_key or GOOGLE_API_KEY env var")
-        sys.exit(1)
-
     index_dir = Path(args.index_dir)
-    if not index_dir.exists():
-        logger.error("Index directory does not exist: %s", index_dir)
-        print(f"Error: Index directory '{index_dir}' does not exist")
+
+    if not index_dir.is_dir():
+        print(f"Error: directory not found — {index_dir}")
         sys.exit(1)
 
-    exit_code = run_smoke_test(index_dir, args.query)
-    sys.exit(exit_code)
+    sys.exit(run_smoke_test(index_dir, args.query, args.k))
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import MarkdownTextSplitter
 from sentence_transformers import SentenceTransformer
 
-from ingest import process_pdf
+from ingest import ingest_pdfs
 
 # WARNING: Verify these APIs against installed docling version.
 # Uncertain: docling_core types may be subject to change in minor versions.
@@ -426,123 +426,50 @@ def main() -> None:
             st.error(msg)
             st.stop()
 
-    # --- Processing Loop ---
-    all_chunks: list[Document] = []
-    per_file_stats: list[tuple[str, int, float]] = []
-    t_session_start = time.monotonic()
-    total_bytes = sum(f.size for f in uploaded_files if f.size)
-    logger.info(
-        "event=session_start file_count=%d total_bytes=%d category=%s",
-        len(uploaded_files),
-        total_bytes,
-        safe_category,
-    )
-
-    progress_bar = st.progress(0, "Starting ingestion...")
-    status_text = st.empty()
-
-    for i, uploaded_file in enumerate(uploaded_files):
-        tmp_path: Path | None = None
-        filename = uploaded_file.name
-        status_text.info(f"Processing ({i+1}/{len(uploaded_files)}): {filename}")
-        progress_bar.progress(
-            (i / len(uploaded_files)), text=f"Processing: {filename}"
-        )
+    # --- Save uploads to temp directory ---
+    tmp_dir = Path(tempfile.mkdtemp())
+    pdf_paths: list[str] = []
+    try:
+        for uploaded_file in uploaded_files:
+            tmp_path = tmp_dir / uploaded_file.name
+            tmp_path.write_bytes(uploaded_file.getvalue())
+            pdf_paths.append(str(tmp_path.resolve()))
 
         logger.info(
-            "event=pdf_start source=%s size_bytes=%d index=%d total=%d",
-            filename,
-            uploaded_file.size,
-            i + 1,
-            len(uploaded_files),
+            "event=session_start file_count=%d category=%s",
+            len(pdf_paths),
+            safe_category,
         )
 
-        doc_processed_successfully = False
-        file_chunks: list[Document] = []
+        # --- Single ingest call ---
+        file_names = [Path(p).name for p in pdf_paths]
+        with st.status(f"Processing {len(pdf_paths)} files...") as status:
+            for name in file_names:
+                status.write(f"  {name}")
+            result = ingest_pdfs(pdf_paths, safe_category)
 
-        fd: int | None = None
-        try:
-            fd, tmp_path_str = tempfile.mkstemp(suffix=".pdf")
-            tmp_path = Path(tmp_path_str)
-            os.close(fd)
-            fd = None
-            tmp_path.write_bytes(uploaded_file.getvalue())
-
-            file_chunks, elapsed, success = process_pdf(
-                tmp_path, filename, safe_category
-            )
-            if success:
-                doc_processed_successfully = True
-        except RuntimeError as e:
-            logger.error("event=pdf_failed source=%s err_type=%s err=%s", filename, type(e).__name__, str(e))
-            st.error(f"Failed to process {filename}: {e}")
-        finally:
-            if doc_processed_successfully:
-                all_chunks.extend(file_chunks)
-                per_file_stats.append((filename, len(file_chunks), elapsed))
-                logger.info(
-                    "event=pdf_complete source=%s chunks=%d elapsed_s=%.2f",
-                    filename,
-                    len(file_chunks),
-                    elapsed,
-                )
-
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    progress_bar.progress(1.0, text="Processing complete. Building index...")
-    status_text.info(
-        f"Processed {len(uploaded_files)} files, "
-        f"extracted {len(all_chunks)} total chunks. Now building index..."
-    )
-
-    # --- Guard & Profiling ---
-    if not all_chunks:
-        logger.error("event=no_chunks source=all files")
-        st.error(
-            "No text chunks were extracted. "
-            "Please check if the uploaded PDFs contain readable text."
+        st.success(f"✅ Index built — {result['chunk_count']} chunks in `{safe_category}_index`")
+        logger.info(
+            "event=session_complete chunk_count=%d category=%s",
+            result["chunk_count"],
+            safe_category,
         )
+
+    except ValueError as e:
+        logger.error("event=session_failed error=%s", str(e))
+        st.error(str(e))
         st.stop()
-
-    st.subheader("Ingestion Profile")
-    if per_file_stats:
-        profile_data = [
-            {
-                "File": filename,
-                "Chunks": count,
-                "Elapsed (s)": f"{elapsed:.2f}",
-                "Chunks/s": f"{count / max(elapsed, 0.01):.1f}",
-            }
-            for filename, count, elapsed in per_file_stats
-        ]
-        st.dataframe(profile_data, use_container_width=True)
-
-    total_elapsed = time.monotonic() - t_session_start
-    c1, c2 = st.columns(2)
-    c1.metric("Total Chunks", len(all_chunks))
-    c2.metric("Total Time (s)", f"{total_elapsed:.2f}")
-
-    # --- Index Compilation ---
-    st.subheader("Index Compilation")
-    with st.spinner("Embedding documents and building FAISS index..."):
-        from ingest import build_and_save_index
-        try:
-            index_dir = build_and_save_index(all_chunks, safe_category)
-            logger.info(
-                "event=session_complete total_chunks=%d total_elapsed_s=%.2f files=%d",
-                len(all_chunks),
-                total_elapsed,
-                len(uploaded_files),
-            )
-            st.success(f"✅ Index built and saved to `{index_dir}`")
-        except RuntimeError as exc:
-            logger.error("event=index_build_failed error=%s", str(exc))
-            st.error(str(exc))
-            st.stop()
+    except RuntimeError as e:
+        logger.error("event=session_failed error=%s", str(e))
+        st.error(str(e))
+        st.stop()
+    finally:
+        # Clean up temp files
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

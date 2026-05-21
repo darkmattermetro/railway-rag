@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Streamlit Cloud Retrieval Application for Railway RAG Pipeline.
 
-Hybrid retrieval with FAISS + BM25, FlashRank reranking, and LLM generation.
+Hybrid retrieval with FAISS + BM25 (RRF merge), FlashRank reranking, and LLM generation.
 Runs within ~1 GB RAM constraint on Streamlit Cloud.
 """
 
@@ -12,59 +12,51 @@ import logging
 import time
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
 import tiktoken
-from langchain_classic.retrievers import ContextualCompressionRetriever, EnsembleRetriever
-from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
-from langchain_community.retrievers import BM25Retriever
+from flashrank import Ranker, RerankRequest
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
-from google.api_core.exceptions import GoogleAPIError
-from groq import APIStatusError, APITimeoutError, RateLimitError
+from rank_bm25 import BM25Okapi
+
+from model_selector import ModelSelector, LLMExhaustedError
 from utils import (
     apply_source_diversity,
+    count_tokens,
     deduplicate_chunks,
-    parse_citations,
+    process_citations,
+    CHUNK_BUDGET,
+    FAISS_SIM_THRESHOLD,
+    FAISS_CONFIDENCE_THRESHOLD,
     RETRIEVAL_K,
-    TOKEN_BUDGET,
 )
-from model_selector import ModelSelector, LLMExhaustedError
 
-# ----------------------------------------------------------------------------
-# Logging configuration
-# ----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# ----------------------------------------------------------------------------
-# Module-level constants
-# ----------------------------------------------------------------------------
 COOLDOWN_SECONDS: float = 1.0
-GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
+GROQ_MODEL: str = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT: int = 45
-GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
+GEMINI_FALLBACK_MODEL: str = "gemini-1.5-flash"
 RERANKER_MODEL: str = "ms-marco-MiniLM-L-12-v2"
-RERANKER_TOP_N: int = 15
+RERANKER_TOP_N: int = 20
+RRF_CONSTANT: int = 60
 INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
 _ENC = tiktoken.get_encoding("cl100k_base")
 
-# ----------------------------------------------------------------------------
-# Helper functions
-# ----------------------------------------------------------------------------
-def _token_length(text: str) -> int:
-    return len(_ENC.encode(text))
-
 
 @st.cache_resource
-def load_vector_index(index_path: Path) -> FAISS:
-    """Load FAISS index from disk with integrity check."""
+def load_indices(category: str) -> tuple:
+    """Load FAISS index and BM25 model for a category. Cached."""
+    index_path = INDEX_DIR / category
+
+    # FAISS
     hash_path = index_path / "index.hash"
     if hash_path.exists():
         expected = hash_path.read_text().strip()
@@ -73,67 +65,134 @@ def load_vector_index(index_path: Path) -> FAISS:
         actual.update((index_path / "index.pkl").read_bytes())
         if actual.hexdigest() != expected:
             raise RuntimeError(f"FAISS index integrity mismatch at {index_path}")
+
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
     vector_store = FAISS.load_local(
-        str(index_path),
-        embeddings,
-        allow_dangerous_deserialization=True,
+        str(index_path), embeddings, allow_dangerous_deserialization=True
     )
-    return vector_store
+
+    # BM25
+    corpus_path = index_path / "bm25_corpus.json"
+    bm25 = None
+    if corpus_path.exists():
+        with open(corpus_path, "r", encoding="utf-8") as f:
+            tokenised_corpus: list[list[str]] = json.load(f)
+        bm25 = BM25Okapi(tokenised_corpus)
+        logger.info("event=bm25_loaded index=%s docs=%d", category, len(tokenised_corpus))
+    else:
+        logger.warning("event=bm25_missing index=%s", category)
+
+    return vector_store, bm25
 
 
-@st.cache_resource
-def load_bm25_corpus(index_dir: Path) -> tuple[BM25Retriever | None, bool]:
-    """Load BM25 corpus from JSON file. Returns (retriever, available_flag)."""
-    corpus_path: Path = index_dir / "bm25_corpus.json"
-    if not corpus_path.exists():
-        logger.warning("event=bm25_missing index=%s", index_dir.name)
-        return None, False
+def _rrf_merge(
+    faiss_results: list[tuple[Document, float]],
+    bm25_results: list[tuple[int, float]],
+    bm25_docstore,
+    bm25_idx_to_docid: dict[int, str],
+    constant: int = RRF_CONSTANT,
+) -> list[Document]:
+    """Merge two ranked lists using Reciprocal Rank Fusion."""
+    rrf_scores: dict[str, dict] = {}
 
-    with open(corpus_path, "r", encoding="utf-8") as f:
-        corpus_data: list[dict] = json.load(f)
+    for rank, (doc, _score) in enumerate(faiss_results, 1):
+        cid = doc.metadata.get("chunk_id")
+        if cid:
+            rrf_scores[cid] = {"doc": doc, "rrf": 1.0 / (constant + rank)}
 
-    bm25_docs: list[Document] = [
-        Document(page_content=item["text"], metadata=item["metadata"])
-        for item in corpus_data
+    for rank, (idx, _score) in enumerate(bm25_results, 1):
+        doc_id = bm25_idx_to_docid.get(idx)
+        if doc_id:
+            doc = bm25_docstore.search(doc_id)
+            cid = doc.metadata.get("chunk_id")
+            if cid:
+                if cid in rrf_scores:
+                    rrf_scores[cid]["rrf"] += 1.0 / (constant + rank)
+                else:
+                    rrf_scores[cid] = {"doc": doc, "rrf": 1.0 / (constant + rank)}
+
+    sorted_results = sorted(rrf_scores.values(), key=lambda x: x["rrf"], reverse=True)
+    return [item["doc"] for item in sorted_results[:RETRIEVAL_K]]
+
+
+def retrieve(query: str, vector_store: FAISS, bm25: BM25Okapi | None) -> tuple[list[Document], dict]:
+    """Retrieve documents using hybrid FAISS + BM25 with RRF merge."""
+    # 1. FAISS search with scores
+    faiss_results: list[tuple[Document, float]] = (
+        vector_store.similarity_search_with_score(query, k=RETRIEVAL_K)
+    )
+
+    # 2. Filter by similarity threshold
+    faiss_results = [(d, s) for d, s in faiss_results if s >= FAISS_SIM_THRESHOLD]
+
+    # 3. Decide whether to use BM25
+    top_score = faiss_results[0][1] if faiss_results else 0.0
+    use_bm25 = bm25 is not None and (not faiss_results or top_score < FAISS_CONFIDENCE_THRESHOLD)
+
+    if use_bm25:
+        query_tokens = query.lower().split()
+        bm25_scores = bm25.get_scores(query_tokens)
+        top_bm25_indices = np.argsort(bm25_scores)[-RETRIEVAL_K:][::-1]
+        bm25_results = [(int(idx), float(bm25_scores[idx])) for idx in top_bm25_indices]
+
+        merged_docs = _rrf_merge(
+            faiss_results,
+            bm25_results,
+            vector_store.docstore,
+            vector_store.index_to_docstore_id,
+        )
+    else:
+        merged_docs = [d for d, _ in faiss_results[:RETRIEVAL_K]]
+
+    if not merged_docs:
+        return [], {}
+
+    # 4. FlashRank rerank
+    ranker = Ranker(model_name=RERANKER_MODEL)
+    passages = [
+        {"id": i, "text": doc.page_content, "meta": dict(doc.metadata)}
+        for i, doc in enumerate(merged_docs)
     ]
-    del corpus_data
-    gc.collect()
+    rerank_request = RerankRequest(query=query, passages=passages)
+    reranked = ranker.rerank(rerank_request)
+    reranked_docs = [merged_docs[r["id"]] for r in reranked]
 
-    bm25_retriever = BM25Retriever.from_documents(bm25_docs)
-    bm25_retriever.k = RETRIEVAL_K
-    logger.info("event=bm25_loaded index=%s docs=%d", index_dir.name, len(bm25_docs))
-    return bm25_retriever, True
+    # 5. Dedup and source diversity
+    deduped = deduplicate_chunks(reranked_docs)
+    diverse = apply_source_diversity(deduped, max_per_page=2)
+
+    # 6. Token budget
+    budget_docs: list[Document] = []
+    total_tokens = 0
+    for doc in diverse:
+        t = count_tokens(doc.page_content)
+        if total_tokens + t > CHUNK_BUDGET:
+            if not budget_docs:
+                budget_docs.append(doc)
+                total_tokens += t
+            break
+        budget_docs.append(doc)
+        total_tokens += t
+
+    logger.info("event=retrieval complete docs=%d tokens=%d", len(budget_docs), total_tokens)
+
+    # 7. Citation map
+    citation_map: dict[str, dict[str, str]] = {}
+    for doc in budget_docs:
+        cid = doc.metadata.get("chunk_id")
+        if cid:
+            citation_map[cid] = {
+                "file": doc.metadata.get("source", "unknown"),
+                "page": str(doc.metadata.get("page_number", "?")),
+            }
+
+    return budget_docs, citation_map
 
 
-def discover_indices() -> list[Path]:
-    """Scan INDEX_DIR for valid index subdirectories."""
-    if not INDEX_DIR.exists():
-        return []
-    indices: list[Path] = []
-    for path in INDEX_DIR.iterdir():
-        if path.is_dir() and path.name.endswith("_index"):
-            # Verify FAISS index files exist
-            if (path / "index.faiss").exists() and (path / "index.pkl").exists():
-                indices.append(path)
-    return sorted(indices)
-
-
-# ----------------------------------------------------------------------------
-# Main application
-# ----------------------------------------------------------------------------
 def main() -> None:
-    """Main entrypoint for the Streamlit retrieval application."""
-
-    # --------------------------------------------------------------------
-    # Secrets (read once in main, not at module scope)
-    # --------------------------------------------------------------------
     groq_api_key: str = st.secrets["GROQ_API_KEY"]
     gemini_api_key: str = st.secrets["GEMINI_API_KEY"]
 
-    # --------------------------------------------------------------------
-    # Session state initialization
-    # --------------------------------------------------------------------
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "last_query_time" not in st.session_state:
@@ -141,21 +200,12 @@ def main() -> None:
     if "current_index" not in st.session_state:
         st.session_state.current_index = None
 
-    # --------------------------------------------------------------------
-    # UI Layout
-    # --------------------------------------------------------------------
-    st.set_page_config(
-        page_title="DMRC Document Search",
-        page_icon="📄",
-        layout="wide",
-    )
+    st.set_page_config(page_title="DMRC Document Search", page_icon="📄", layout="wide")
 
     st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
     * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-
     .dmrc-header {
         background: #003366;
         padding: 1.5rem 2rem 0.8rem 2rem;
@@ -177,13 +227,10 @@ def main() -> None:
         padding-bottom: 0.5rem;
         border-bottom: 1px solid rgba(255,255,255,0.15);
     }
-
     .stChatInput { border: 2px solid #D0D8E0; border-radius: 8px; transition: border-color 0.2s; }
     .stChatInput:focus, .stChatInput:focus-within { border-color: #003366; box-shadow: 0 0 0 2px rgba(0,51,102,0.1); }
     .stChatInput input { font-size: 0.9rem; }
-
     .stChatFloatingInputContainer { border-radius: 8px; }
-
     [data-testid="stChatMessage"] {
         border-left: 3px solid #D0D8E0;
         padding-left: 0.75rem;
@@ -192,7 +239,6 @@ def main() -> None:
         border-radius: 0 6px 6px 0;
     }
     [data-testid="stChatMessageContent"] { font-size: 0.95rem; line-height: 1.6; color: #1A1A2E; }
-
     .st-expander {
         border: 1px solid #E0E4E8;
         border-radius: 6px;
@@ -202,19 +248,10 @@ def main() -> None:
     }
     .st-expander:hover { border-color: #003366; }
     .st-expander summary { font-size: 0.9rem; font-weight: 500; color: #003366; padding: 0.25rem 0; }
-
     hr { margin: 1rem 0; border-color: #E0E4E8; }
-
-    .status-msg {
-        color: #5A6A7E;
-        font-size: 0.85rem;
-        font-style: italic;
-        margin: 0.5rem 0;
-    }
-
+    .status-msg { color: #5A6A7E; font-size: 0.85rem; font-style: italic; margin: 0.5rem 0; }
     [data-testid="stSidebar"] { background: #FFFFFF; border-right: 1px solid #E0E4E8; }
     [data-testid="stSidebar"] .stSelectbox label { font-size: 0.85rem; font-weight: 500; color: #1A1A2E; }
-
     .stAlert { border-left: 3px solid #003366; background: #F0F4F8; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
@@ -226,181 +263,68 @@ def main() -> None:
 </div>
 """, unsafe_allow_html=True)
 
-    # --------------------------------------------------------------------
-    # Index selection sidebar
-    # --------------------------------------------------------------------
     with st.sidebar:
         st.header("Document Collection")
-        available_indices = discover_indices()
-
+        available_indices = sorted(
+            p.name for p in INDEX_DIR.iterdir()
+            if p.is_dir() and p.name.endswith("_index")
+            and (p / "index.faiss").exists() and (p / "index.pkl").exists()
+        )
         if not available_indices:
-            st.error(
-                "No vector indices found. Please run local_builder.py first to "
-                "ingest documents into the vector_indices/ directory."
-            )
+            st.error("No vector indices found. Run ingest.py first.")
             st.stop()
 
-        index_names: list[str] = [p.name for p in available_indices]
-        selected_index_name: str = st.selectbox(
-            "Collection",
-            index_names,
-            help="Choose which document set to search",
-        )
-        selected_index_path: Path = INDEX_DIR / selected_index_name
+        selected_index: str = st.selectbox("Collection", available_indices)
 
-        # Clear chat history when index changes
-        if st.session_state.current_index != selected_index_name:
+        if st.session_state.current_index != selected_index:
             st.session_state.messages = []
-            st.session_state.current_index = selected_index_name
+            st.session_state.current_index = selected_index
 
-        # Load index and BM25
         with st.spinner("Loading..."):
-            vector_store = load_vector_index(selected_index_path)
-            faiss_docs_count: int = vector_store.index.ntotal
-            logger.info("event=index_loaded index=%s faiss_docs=%d", selected_index_name, faiss_docs_count)
+            vector_store, bm25 = load_indices(selected_index)
+            faiss_docs = vector_store.index.ntotal
+            bm25_status = "✓ BM25" if bm25 else "✗ BM25 unavailable"
+            st.caption(f"{faiss_docs} docs | {bm25_status}")
 
-        bm25_retriever, bm25_available = load_bm25_corpus(selected_index_path)
-
-        if not bm25_available:
-            logger.warning("event=bm25_missing index=%s", selected_index_name)
-
-    # --------------------------------------------------------------------
-    # Chat history display
-    # --------------------------------------------------------------------
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # --------------------------------------------------------------------
-    # Query handling
-    # --------------------------------------------------------------------
     user_query: str = st.chat_input("Ask a question about DMRC documents...")
 
     if user_query:
-        t_query_start: float = time.monotonic()
-
-        # Cooldown protection
         if time.time() - st.session_state.last_query_time < COOLDOWN_SECONDS:
             st.warning("Please wait a moment before submitting another query.")
             st.stop()
         st.session_state.last_query_time = time.time()
 
-        logger.info("event=query_received query_len=%d", len(user_query))
-
-        # Add user message to history
         st.session_state.messages.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        # --------------------------------------------------------------------
-        # LLM Setup (for query condensation and final generation)
-        # --------------------------------------------------------------------
-        # Get model lists from secrets with fallbacks to original values
-        gemini_models = st.secrets.get("GEMINI_MODELS", [GEMINI_PRIMARY_MODEL])
-        groq_models = st.secrets.get("GROQ_MODELS", [GROQ_FALLBACK_MODEL])
-        
-        # Initialize model selector
+        groq_model = st.secrets.get("GROQ_MODEL", GROQ_MODEL)
+        gemini_model = st.secrets.get("GEMINI_FALLBACK_MODEL", GEMINI_FALLBACK_MODEL)
         llm_selector = ModelSelector(
-            gemini_models=gemini_models,
-            groq_models=groq_models,
+            groq_api_key=groq_api_key,
             gemini_api_key=gemini_api_key,
-            groq_api_key=groq_api_key
+            groq_model=groq_model,
+            gemini_model=gemini_model,
+            groq_timeout=GROQ_TIMEOUT,
         )
 
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
             response_placeholder.markdown('<div class="status-msg">Searching documents...</div>', unsafe_allow_html=True)
 
-            # ----------------------------------------------------------------
-            # Setup retrievers
-            # ----------------------------------------------------------------
-            faiss_retriever = vector_store.as_retriever(search_kwargs={"k": RETRIEVAL_K})
+            retrieved_docs, citation_map = retrieve(user_query, vector_store, bm25)
 
-            if bm25_available:
-                ensemble_retriever = EnsembleRetriever(
-                    retrievers=[faiss_retriever, bm25_retriever],
-                    weights=[0.3, 0.7],
-                )
-                active_retriever = ensemble_retriever
-            else:
-                active_retriever = faiss_retriever
+            if not retrieved_docs:
+                response_placeholder.markdown("No relevant documents found.")
+                st.session_state.messages.append({"role": "assistant", "content": "No relevant documents found."})
+                st.stop()
 
-            # ----------------------------------------------------------------
-            # Reranking setup
-            # ----------------------------------------------------------------
-            reranker = FlashrankRerank(
-                model=RERANKER_MODEL,
-                top_n=RERANKER_TOP_N,
-            )
-            compression_retriever = ContextualCompressionRetriever(
-                base_compressor=reranker,
-                base_retriever=active_retriever,
-            )
-
-            # ----------------------------------------------------------------
-            # Retrieval
-            # ----------------------------------------------------------------
-            retrieved_docs: list[Document] = compression_retriever.invoke(user_query)
-            raw_count: int = len(retrieved_docs)
-
-            # ----------------------------------------------------------------
-            # Deduplication
-            # ----------------------------------------------------------------
-            deduped_docs = deduplicate_chunks(retrieved_docs)
-            deduped_count: int = len(deduped_docs)
-
-            # Source diversity: max 2 chunks per (source, page) pair
-            diverse_docs = apply_source_diversity(deduped_docs, max_per_page=2)
-            diverse_count: int = len(diverse_docs)
-            logger.info(
-                "event=dedup_complete before=%d deduped=%d diverse=%d",
-                raw_count,
-                deduped_count,
-                diverse_count,
-            )
-
-            reranked_docs: list[Document] = diverse_docs[:RERANKER_TOP_N]
-            reranked_count: int = len(reranked_docs)
-            logger.info(
-                "event=retrieval_complete raw=%d deduped=%d diverse=%d reranked=%d",
-                raw_count,
-                deduped_count,
-                diverse_count,
-                reranked_count,
-            )
-
-            # ----------------------------------------------------------------
-            # Token budget protection
-            # ----------------------------------------------------------------
-            context_parts: list[str] = []
-            total_tokens: int = 0
-
-            for i, doc in enumerate(reranked_docs):
-                chunk_tokens: int = _token_length(doc.page_content)
-                if total_tokens + chunk_tokens > TOKEN_BUDGET:
-                    remaining: int = TOKEN_BUDGET - total_tokens
-                    truncated_text: str = _ENC.decode(_ENC.encode(doc.page_content)[:remaining])
-                    context_parts.append(truncated_text)
-                    total_tokens += remaining
-                    logger.info(
-                        "event=token_budget_truncated chunk=%d remaining=%d total=%d",
-                        i,
-                        remaining,
-                        total_tokens,
-                    )
-                    break
-                context_parts.append(doc.page_content)
-                total_tokens += chunk_tokens
-
-            logger.info(
-                "event=context_built chunks=%d tokens=%d",
-                len(context_parts),
-                total_tokens,
-            )
-
-            # ----------------------------------------------------------------
-            # Build prompt
-            # ----------------------------------------------------------------
+            # --- Build prompt ---
+            valid_ids = list(citation_map.keys())
             SYSTEM_PROMPT: str = (
                 "You are a technical rail analyst for DMRC.\n"
                 "Answer using the provided context blocks as your primary source.\n"
@@ -417,13 +341,13 @@ def main() -> None:
                 "Synthesize the information. Do NOT repeat the same point "
                 "multiple times — if multiple chunks contain the same "
                 "information, state it once.\n\n"
-                "At the end of your answer append:\n"
-                "<used_chunks>[0, 2]</used_chunks>\n\n"
-                "The values inside used_chunks must be integers only — "
-                "not ranges, not strings."
+                "When you use information from a chunk, cite it inline as [chunk_id].\n"
+                f"Use only chunk_ids present in: {valid_ids}\n"
+                "For example: 'The signal height is 2.5m [chunk_0]'\n"
+                "If no specific chunk supports a statement, do not add any citation."
             )
 
-            context_str: str = "\n\n---\n\n".join(context_parts)
+            context_str: str = "\n\n---\n\n".join(doc.page_content for doc in retrieved_docs)
             user_prompt: str = (
                 f"Context:\n{context_str}\n\n"
                 f"Question: {user_query}\n\n"
@@ -436,75 +360,52 @@ def main() -> None:
                 HumanMessage(content=user_prompt),
             ]
 
-            # ----------------------------------------------------------------
-            # LLM Generation with intelligent fallback and model rotation
-            # ----------------------------------------------------------------
+            # --- LLM Generation ---
             response_placeholder.markdown('<div class="status-msg">Generating answer...</div>', unsafe_allow_html=True)
-            full_response: str = ""
-            t_llm_start: float = time.monotonic()
+            t_llm_start = time.monotonic()
 
             try:
                 result = llm_selector.invoke_with_fallback(messages)
                 full_response = result.content
-                # Note: Success logging is now handled inside ModelSelector.invoke_with_fallback
-            except LLMExhaustedError as e:
-                logger.error(
-                    "event=llm_all_providers_exhausted error=%s",
-                    str(e)[:200],
-                )
-                st.error("All LLM providers are temporarily unavailable due to quota limits. Please try again later.")
+            except LLMExhaustedError:
+                logger.error("event=llm_all_providers_exhausted")
+                st.error("All LLM providers are temporarily unavailable. Please try again later.")
                 st.stop()
+                return
             except Exception as e:
-                logger.error(
-                    "event=llm_unexpected_error error=%s",
-                    str(e)[:200],
-                )
+                logger.error("event=llm_unexpected_error error=%s", str(e)[:200])
                 st.error("An unexpected error occurred. Please try again later.")
                 st.stop()
+                return
 
-            # ----------------------------------------------------------------
-            # Citation synthesis (programmatic, not trusting LLM)
-            # ----------------------------------------------------------------
-            display_response, chunk_indices = parse_citations(full_response)
-
-            # Display the answer
+            # --- Citation synthesis ---
+            display_response, cited_ids = process_citations(full_response, citation_map)
             response_placeholder.markdown(display_response)
 
-            # Render LLM-tagged citations with expandable chunk text
+            # Render expanders
+            ref_num = 1
             seen_citations: set[str] = set()
-            ref_num = 1  # Reference counter starting at 1
-            for idx in chunk_indices:
-                if 0 <= idx < len(reranked_docs):
-                    doc = reranked_docs[idx]
-                    source: str = doc.metadata.get("source", "unknown")
-                    page: str = str(doc.metadata.get("page_number", "?"))
-                    citation_key: str = f"{source}:{page}"
-                    if citation_key not in seen_citations:
-                        seen_citations.add(citation_key)
-                        with st.expander(
-                            f"**Refer {ref_num}**",
-                            expanded=False,
-                        ):
-                            st.caption(f"{source} — Page {page}")
+            for cid in cited_ids:
+                ref = citation_map.get(cid)
+                if not ref:
+                    continue
+                citation_key = f"{ref['file']}:{ref['page']}"
+                if citation_key in seen_citations:
+                    continue
+                seen_citations.add(citation_key)
+                with st.expander(f"**Refer {ref_num}**", expanded=False):
+                    st.caption(f"{ref['file']} — Page {ref['page']}")
+                    for doc in retrieved_docs:
+                        if doc.metadata.get("chunk_id") == cid:
                             st.text(doc.page_content)
-                        ref_num += 1
+                            break
+                ref_num += 1
 
-            logger.info(
-                "event=citations_rendered count=%d indices=%s",
-                len(seen_citations),
-                chunk_indices,
-            )
+            logger.info("event=query_complete tokens=%d citations=%d", len(context_str), len(seen_citations))
+            elapsed = time.monotonic() - t_llm_start
+            logger.info("event=llm_done elapsed_s=%.2f model=%s", elapsed, "groq/gemini")
 
-            logger.info(
-                "event=query_complete tokens=%d citations=%d",
-                total_tokens,
-                len(seen_citations),
-            )
-
-        # Add assistant response to history
-        st.session_state.messages.append(
-            {"role": "assistant", "content": display_response}
-        )
+        st.session_state.messages.append({"role": "assistant", "content": display_response})
 
 
 if __name__ == "__main__":

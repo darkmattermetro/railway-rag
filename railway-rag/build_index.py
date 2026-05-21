@@ -22,12 +22,9 @@ import logging
 import os
 import re
 import sys
-import time
 from pathlib import Path
 
-from langchain_core.documents import Document
-
-from ingest import process_pdf
+from ingest import ingest_pdfs
 from local_builder import (
     CATEGORY_MAX_LEN,
     MAX_FILE_SIZE_BYTES,
@@ -150,89 +147,21 @@ def main():
     
     logger.info(f"Found {len(pdf_paths)} PDF files to process")
 
-    # No longer need Google API key for local embeddings
-    # Keeping this section for compatibility but not requiring the key
-    google_api_key = os.environ.get('GOOGLE_API_KEY', None)
-
-    # Processing loop
-    all_chunks: list[Document] = []
-    per_file_stats: list[tuple[str, int, float]] = []
-    t_session_start = time.monotonic()
-    total_bytes = sum(p.stat().st_size for p in pdf_paths if p.stat().st_size)
-    logger.info(
-        "event=session_start file_count=%d total_bytes=%d category=%s",
-        len(pdf_paths),
-        total_bytes,
-        safe_category,
-    )
-
-    for i, pdf_path in enumerate(pdf_paths):
-        filename = pdf_path.name
-        logger.info(f"Processing ({i+1}/{len(pdf_paths)}): {filename}")
-
-        file_chunks, elapsed, success = process_pdf(
-            pdf_path, filename, safe_category
-        )
-
-        if success:
-            all_chunks.extend(file_chunks)
-            per_file_stats.append((filename, len(file_chunks), elapsed))
-            logger.info(
-                "event=pdf_complete source=%s chunks=%d elapsed_s=%.2f",
-                filename,
-                len(file_chunks),
-                elapsed,
-            )
-
-    print(
-        f"Processed {len(pdf_paths)} files, "
-        f"extracted {len(all_chunks)} total chunks. Now building index..."
-    )
-
-    # --- Guard & Profiling ---
-    if not all_chunks:
-        logger.error("event=no_chunks source=all files")
-        print(
-            "No text chunks were extracted. "
-            "Please check if the uploaded PDFs contain readable text."
-        )
-        sys.exit(1)
-
-    print("\nIngestion Profile")
-    if per_file_stats:
-        profile_data = [
-            {
-                "File": filename,
-                "Chunks": count,
-                "Elapsed (s)": f"{elapsed:.2f}",
-                "Chunks/s": f"{count / max(elapsed, 0.01):.1f}",
-            }
-            for filename, count, elapsed in per_file_stats
-        ]
-        # Print as a simple table
-        print(f"{'File':<30} {'Chunks':<8} {'Elapsed (s)':<12} {'Chunks/s'}")
-        print("-" * 60)
-        for row in profile_data:
-            print(f"{row['File']:<30} {row['Chunks']:<8} {row['Elapsed (s)']:<12} {row['Chunks/s']}")
-
-    total_elapsed = time.monotonic() - t_session_start
-    print(f"\nTotal Chunks: {len(all_chunks)}")
-    print(f"Total Time (s): {total_elapsed:.2f}")
-
-    # --- Index Compilation ---
-    print("\nEmbedding documents and building FAISS index...")
-    from ingest import build_and_save_index
+    # --- Single ingest call ---
+    print("Processing:")
+    for p in pdf_paths:
+        print(f"  {p.name}")
     try:
-        index_dir = build_and_save_index(all_chunks, safe_category)
+        pdf_path_strs = [str(p.resolve()) for p in pdf_paths]
+        result = ingest_pdfs(pdf_path_strs, safe_category)
+        print(f"[SUCCESS] Index built — {result['chunk_count']} chunks in `{safe_category}_index`")
         logger.info(
-            "event=session_complete total_chunks=%d total_elapsed_s=%.2f files=%d",
-            len(all_chunks),
-            total_elapsed,
-            len(pdf_paths),
+            "event=session_complete chunk_count=%d category=%s",
+            result["chunk_count"],
+            safe_category,
         )
-        print(f"[SUCCESS] Index built and saved to `{index_dir}`")
-    except RuntimeError as exc:
-        logger.error("event=index_build_failed error=%s", str(exc))
+    except (ValueError, RuntimeError) as exc:
+        logger.error("event=session_failed error=%s", str(exc))
         print(f"Error: {exc}")
         sys.exit(1)
 

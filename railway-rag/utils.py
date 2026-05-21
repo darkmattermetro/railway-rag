@@ -1,14 +1,48 @@
 """Shared utility functions for the Railway RAG pipeline."""
 
+import json
 import logging
 import re
+import sys
+from dataclasses import dataclass
 
+import tiktoken
 from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
 RETRIEVAL_K: int = 20
-TOKEN_BUDGET: int = 80_000
+MAX_CONTEXT_TOKENS: int = 3500
+RESERVE_TOKENS: int = 500
+CHUNK_BUDGET: int = MAX_CONTEXT_TOKENS - RESERVE_TOKENS  # 3000
+
+FAISS_SIM_THRESHOLD: float = 0.35
+FAISS_CONFIDENCE_THRESHOLD: float = 0.60
+GARBAGE_RATIO_THRESHOLD: float = 0.40
+EMBEDDING_RETRY_WAIT_SECS: int = 60
+
+_ENC = tiktoken.get_encoding("cl100k_base")
+
+
+@dataclass
+class Chunk:
+    text: str
+    source_file: str
+    page_number: int
+    chunk_id: str
+    char_start: int
+    char_end: int
+    token_count: int
+
+
+def count_tokens(text: str) -> int:
+    return len(_ENC.encode(text))
+
+
+def log_event(event: str, **kwargs) -> None:
+    record = {"timestamp": __import__("time").time(), "event": event}
+    record.update(kwargs)
+    print(json.dumps(record, ensure_ascii=False), file=sys.stderr)
 
 
 def _word_overlap_ratio(text1: str, text2: str) -> float:
@@ -58,27 +92,25 @@ def apply_source_diversity(documents: list[Document], max_per_page: int = 2) -> 
     return result
 
 
-def parse_citations(full_response: str) -> tuple[str, list[int]]:
-    match = re.search(
-        r"<used_chunks>\s*(\[.*?\])\s*</used_chunks>",
-        full_response,
-        re.DOTALL,
-    )
-    chunk_indices: list[int] = []
-    if match:
-        inner = match.group(1).strip()
-        if inner.startswith("[") and inner.endswith("]"):
-            inner = inner[1:-1]
-            for part in inner.split(","):
-                part = part.strip()
-                if part and (part.isdigit() or (part.startswith("-") and part[1:].isdigit())):
-                    chunk_indices.append(int(part))
+def process_citations(response: str, citation_map: dict) -> tuple[str, list[str]]:
+    pattern = re.compile(r'\[(chunk_\d+)\]')
+    matches = pattern.findall(response)
 
-    display_response = re.sub(
-        r"<used_chunks>.*?</used_chunks>",
-        "",
-        full_response,
-        flags=re.DOTALL,
-    ).strip()
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+    for m in matches:
+        if m in citation_map:
+            if m not in seen:
+                seen.add(m)
+                ordered_ids.append(m)
+        else:
+            logger.warning("event=hallucinated_citation chunk_id=%s", m)
 
-    return display_response, chunk_indices
+    replacement = {cid: f"[Refer {i + 1}]" for i, cid in enumerate(ordered_ids)}
+
+    def _replacer(m: re.Match) -> str:
+        cid = m.group(1)
+        return replacement.get(cid, "")
+
+    processed = pattern.sub(_replacer, response).strip()
+    return processed, ordered_ids
