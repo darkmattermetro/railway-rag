@@ -6,7 +6,6 @@ import logging
 from typing import List, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
 from groq import RateLimitError, APIStatusError, APITimeoutError
 from google.api_core.exceptions import GoogleAPIError
 from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
@@ -28,19 +27,15 @@ class ModelSelector:
         self,
         gemini_models: List[str],
         groq_models: List[str],
-        hf_models: List[str],
         gemini_api_key: str,
         groq_api_key: str,
-        hf_api_key: str,
         max_retries_per_model: int = 2,
         cooldown_seconds: int = 30
     ):
         self.gemini_models = gemini_models
         self.groq_models = groq_models
-        self.hf_models = hf_models
         self.gemini_api_key = gemini_api_key
         self.groq_api_key = groq_api_key
-        self.hf_api_key = hf_api_key
         self.max_retries_per_model = max_retries_per_model
         self.cooldown_seconds = cooldown_seconds
         
@@ -62,14 +57,6 @@ class ModelSelector:
                 'last_error_time': 0,
                 'is_exhausted': False,
                 'provider': 'groq'
-            }
-            
-        for model in hf_models:
-            self.model_states[model] = {
-                'retries': 0,
-                'last_error_time': 0,
-                'is_exhausted': False,
-                'provider': 'hf'
             }
         self.last_provider: Optional[str] = None
     
@@ -167,15 +154,6 @@ class ModelSelector:
                 api_key=self.groq_api_key,
                 timeout=45  # Default timeout
             )
-        elif provider == 'hf':
-            return ChatHuggingFace(
-                llm=HuggingFaceEndpoint(
-                    repo_id=model_name,
-                    huggingfacehub_api_token=self.hf_api_key,
-                    temperature=0,
-                    max_new_tokens=512
-                )
-            )
         else:
             raise ValueError(f"Unknown provider: {provider}")
     
@@ -268,34 +246,6 @@ class ModelSelector:
                 last_error = e
                 logger.warning(
                     f"event=llm_fallback_failed model={model_name} provider=groq error={type(e).__name__}"
-                )
-                # Treat unexpected errors as potential quota issues to be safe
-                self._mark_model_exhausted(model_name, e)
-                continue
-        
-        # Try HF models if Gemini and Groq models failed or unavailable
-        for attempt in range(len(self.hf_models)):
-            model_name = self._get_next_available_model('hf')
-            if not model_name:
-                logger.warning("event=llm_no_available_models provider=hf")
-                break
-                
-            try:
-                logger.info(f"event=llm_attempt model={model_name} provider=hf")
-                llm_start = time.monotonic()
-                llm = self._create_llm_instance(model_name, 'hf')
-                result = llm.invoke(messages)
-                elapsed = time.monotonic() - llm_start
-                logger.info(
-                    f"event=llm_fallback_success model={model_name} elapsed_s={elapsed:.2f}"
-                )
-                self.last_provider = "HF"
-                return result
-            except Exception as e:
-                # Catch any other unexpected exceptions
-                last_error = e
-                logger.warning(
-                    f"event=llm_fallback_failed model={model_name} provider=hf error={type(e).__name__}"
                 )
                 # Treat unexpected errors as potential quota issues to be safe
                 self._mark_model_exhausted(model_name, e)
