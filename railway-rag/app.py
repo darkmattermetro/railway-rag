@@ -50,15 +50,14 @@ COOLDOWN_SECONDS: float = 1.0
 GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT: int = 45
 GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
+HF_FALLBACK_MODEL: str = "HuggingFaceH4/zephyr-7b-beta"  # Example fallback HF model
 RERANKER_MODEL: str = "ms-marco-MiniLM-L-12-v2"
 RERANKER_TOP_N: int = 15
 MAX_CITATION_EXPANDERS: int = 5
 INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
 _ENC = tiktoken.get_encoding("cl100k_base")
 
-# ----------------------------------------------------------------------------
-# Helper functions
-# ----------------------------------------------------------------------------
+
 def _token_length(text: str) -> int:
     return len(_ENC.encode(text))
 
@@ -71,6 +70,11 @@ def _calculate_text_overlap(text1: str, text2: str) -> float:
     if not words1 or not words2:
         return 0.0
     return len(words1 & words2) / max(len(words1), len(words2))
+
+
+# ----------------------------------------------------------------------------
+# Helper functions
+# ----------------------------------------------------------------------------
 
 
 @st.cache_resource
@@ -128,19 +132,6 @@ def discover_indices() -> list[Path]:
             if (path / "index.faiss").exists() and (path / "index.pkl").exists():
                 indices.append(path)
     return sorted(indices)
-
-
-# ----------------------------------------------------------------------------
-# Main application
-# ----------------------------------------------------------------------------
-def main() -> None:
-    """Main entrypoint for the Streamlit retrieval application."""
-
-    # --------------------------------------------------------------------
-    # Secrets (read once in main, not at module scope)
-    # --------------------------------------------------------------------
-    groq_api_key: str = st.secrets["GROQ_API_KEY"]
-    gemini_api_key: str = st.secrets["GEMINI_API_KEY"]
 
     # --------------------------------------------------------------------
     # Session state initialization
@@ -312,13 +303,16 @@ def main() -> None:
         # Get model lists from secrets with fallbacks to original values
         gemini_models = st.secrets.get("GEMINI_MODELS", [GEMINI_PRIMARY_MODEL])
         groq_models = st.secrets.get("GROQ_MODELS", [GROQ_FALLBACK_MODEL])
+        hf_models = st.secrets.get("HF_MODELS", [HF_FALLBACK_MODEL])
         
         # Initialize model selector
         llm_selector = ModelSelector(
             gemini_models=gemini_models,
             groq_models=groq_models,
+            hf_models=hf_models,
             gemini_api_key=gemini_api_key,
-            groq_api_key=groq_api_key
+            groq_api_key=groq_api_key,
+            hf_api_key=hf_api_key
         )
 
         with st.chat_message("assistant"):
