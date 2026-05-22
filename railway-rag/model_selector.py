@@ -58,6 +58,7 @@ class ModelSelector:
                 'is_exhausted': False,
                 'provider': 'groq'
             }
+        self.last_provider: Optional[str] = None
     
     def _is_model_available(self, model_name: str) -> bool:
         """Check if a model is available (not exhausted or in cooldown)"""
@@ -180,6 +181,7 @@ class ModelSelector:
                 logger.info(
                     f"event=llm_primary_success model={model_name} elapsed_s={elapsed:.2f}"
                 )
+                self.last_provider = "Gemini"
                 return result
             except (GoogleAPIError, ResourceExhausted, ServiceUnavailable) as e:
                 last_error = e
@@ -222,6 +224,7 @@ class ModelSelector:
                 logger.info(
                     f"event=llm_fallback_success model={model_name} elapsed_s={elapsed:.2f}"
                 )
+                self.last_provider = "Groq"
                 return result
             except (RateLimitError, APIStatusError, APITimeoutError) as e:
                 last_error = e

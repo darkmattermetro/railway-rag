@@ -52,6 +52,7 @@ GROQ_TIMEOUT: int = 45
 GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
 RERANKER_MODEL: str = "ms-marco-MiniLM-L-12-v2"
 RERANKER_TOP_N: int = 15
+MAX_CITATION_EXPANDERS: int = 5
 INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
 _ENC = tiktoken.get_encoding("cl100k_base")
 
@@ -60,6 +61,16 @@ _ENC = tiktoken.get_encoding("cl100k_base")
 # ----------------------------------------------------------------------------
 def _token_length(text: str) -> int:
     return len(_ENC.encode(text))
+
+
+def _calculate_text_overlap(text1: str, text2: str) -> float:
+    """Calculates a simple word-overlap score between two strings."""
+    import re
+    words1 = set(re.findall(r"\b[a-z0-9]+\b", text1.lower()))
+    words2 = set(re.findall(r"\b[a-z0-9]+\b", text2.lower()))
+    if not words1 or not words2:
+        return 0.0
+    return len(words1 & words2) / max(len(words1), len(words2))
 
 
 @st.cache_resource
@@ -271,6 +282,9 @@ def main() -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    if last_llm := st.session_state.get("last_llm"):
+        st.caption(f"{last_llm}")
+
     # --------------------------------------------------------------------
     # Query handling
     # --------------------------------------------------------------------
@@ -446,6 +460,7 @@ def main() -> None:
             try:
                 result = llm_selector.invoke_with_fallback(messages)
                 full_response = result.content
+                st.session_state.last_llm = llm_selector.last_provider
                 # Note: Success logging is now handled inside ModelSelector.invoke_with_fallback
             except LLMExhaustedError as e:
                 logger.error(
@@ -467,13 +482,33 @@ def main() -> None:
             # ----------------------------------------------------------------
             display_response, chunk_indices = parse_citations(full_response)
 
+            # Select top N most relevant citations based on word overlap with the response
+            # 1. Filter valid indices
+            valid_indices = [idx for idx in chunk_indices if 0 <= idx < len(reranked_docs)]
+
+            # 2. Score and Rank
+            if valid_indices:
+                # Calculate scores and store as (score, original_index)
+                scored_indices = []
+                for idx in valid_indices:
+                    score = _calculate_text_overlap(display_response, reranked_docs[idx].page_content)
+                    scored_indices.append((score, idx))
+                
+                # Sort by score (descending), then by original index (ascending) for stability
+                scored_indices.sort(key=lambda x: (-x[0], x[1]))
+                
+                # 3. Select top N
+                final_indices = [idx for score, idx in scored_indices[:MAX_CITATION_EXPANDERS]]
+            else:
+                final_indices = []
+
             # Display the answer
             response_placeholder.markdown(display_response)
 
             # Render LLM-tagged citations with expandable chunk text
             seen_citations: set[str] = set()
             ref_num = 1  # Reference counter starting at 1
-            for idx in chunk_indices:
+            for idx in final_indices:
                 if 0 <= idx < len(reranked_docs):
                     doc = reranked_docs[idx]
                     source: str = doc.metadata.get("source", "unknown")
