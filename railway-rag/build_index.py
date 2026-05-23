@@ -13,10 +13,9 @@ import argparse
 import logging
 import re
 import sys
-import time
 from pathlib import Path
 
-from ingest import ingest_pdfs, read_ingest_state, clear_cache
+from ingest import ingest_pdfs
 from local_builder import (
     CATEGORY_MAX_LEN,
     MAX_FILE_SIZE_BYTES,
@@ -106,39 +105,21 @@ def main():
 
     logger.info(f"Found {len(pdf_paths)} PDF files to process")
 
-    # Resume check
-    state = read_ingest_state(safe_category)
-    completed = set(state.get("completed_files", []))
-    filenames = {Path(p).name for p in pdf_paths}
-    matching = completed & filenames
-    if matching:
-        print(f"\n\u26a0\ufe0f Incomplete session found: {len(matching)} of {len(pdf_paths)} files already processed.")
-        print(f"   Completed: {', '.join(sorted(matching))}")
-        choice = input("   [R]esume or [F]resh? ").strip().lower()
-        if choice and choice[0] == "f":
-            clear_cache(safe_category, delete_chunks=True)
-            print("   Starting fresh.\n")
-        else:
-            print("   Resuming \u2014 cached files will be skipped.\n")
-
-    # Processing via ingest_pdfs (handles all chunking, caching, and indexing)
-    t_start = time.monotonic()
-    logger.info("event=session_start file_count=%d category=%s", len(pdf_paths), safe_category)
-
+    # --- Single ingest call ---
+    print("Processing:")
+    for p in pdf_paths:
+        print(f"  {p.name}")
     try:
-        result = ingest_pdfs(pdf_paths, safe_category)
-        elapsed = time.monotonic() - t_start
-        print(f"\nProcessed {len(pdf_paths)} files, extracted {result['chunk_count']} total chunks.")
-        print(f"Total Time (s): {elapsed:.2f}")
-        print(f"[SUCCESS] Index built and saved to `vector_indices/{safe_category}_index`")
+        pdf_path_strs = [str(p.resolve()) for p in pdf_paths]
+        result = ingest_pdfs(pdf_path_strs, safe_category)
+        print(f"[SUCCESS] Index built — {result['chunk_count']} chunks in `{safe_category}_index`")
         logger.info(
-            "event=session_complete total_chunks=%d total_elapsed_s=%.2f files=%d",
+            "event=session_complete chunk_count=%d category=%s",
             result["chunk_count"],
-            elapsed,
-            len(pdf_paths),
+            safe_category,
         )
-    except Exception as exc:
-        logger.error("event=index_build_failed error=%s", str(exc))
+    except (ValueError, RuntimeError) as exc:
+        logger.error("event=session_failed error=%s", str(exc))
         print(f"Error: {exc}")
         sys.exit(1)
 
