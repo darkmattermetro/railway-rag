@@ -4,7 +4,7 @@ Unit tests for the extract_chunks() function from local_builder.py
 from pathlib import Path
 from unittest.mock import Mock
 
-from local_builder import extract_chunks, _token_length
+from ingest import extract_chunks, _token_length
 from docling_core.types.doc import (
     DoclingDocument,
     SectionHeaderItem,
@@ -37,7 +37,6 @@ def test_heading_tracked_in_metadata():
         doc=mock_doc,
         filename="test.pdf",
         category="test_category",
-        source_pdf_path=Path("test.pdf"),
     )
 
     assert len(chunks) > 0, "Should return at least one chunk"
@@ -60,7 +59,6 @@ def test_table_not_split():
         doc=mock_doc,
         filename="test.pdf",
         category="test_category",
-        source_pdf_path=Path("test.pdf"),
     )
 
     assert len(chunks) == 1, f"Expected exactly one chunk for table, got {len(chunks)}"
@@ -83,7 +81,6 @@ def test_table_continuity_detected():
         doc=mock_doc,
         filename="test.pdf",
         category="test_category",
-        source_pdf_path=Path("test.pdf"),
     )
 
     assert len(chunks) >= 1, "Should return at least one chunk"
@@ -112,7 +109,6 @@ def test_table_continuity_not_set_on_heading_change():
         doc=mock_doc,
         filename="test.pdf",
         category="test_category",
-        source_pdf_path=Path("test.pdf"),
     )
 
     assert len(chunks) >= 1, "Should return at least one chunk"
@@ -135,7 +131,6 @@ def test_metadata_schema_complete():
         doc=mock_doc,
         filename="test.pdf",
         category="test_category",
-        source_pdf_path=Path("test.pdf"),
     )
 
     assert len(chunks) > 0, "Should return at least one chunk"
@@ -171,7 +166,6 @@ def test_empty_document_returns_empty_list():
         doc=mock_doc,
         filename="test.pdf",
         category="test_category",
-        source_pdf_path=Path("test.pdf"),
     )
 
     assert chunks == [], "Empty document should return empty list"

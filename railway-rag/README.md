@@ -112,7 +112,6 @@ pip install -r requirements.txt
 1. Activate your venv.
 2. Run: `streamlit run local_builder.py`
 3. In the sidebar:
-   - Enter your Google API key.
    - Enter a Category Name (e.g. "Signalling_Standards").
    - Upload one or more railway PDFs (max 200 MB each).
 4. Click Process / Run.

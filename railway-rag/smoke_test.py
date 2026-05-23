@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -55,14 +54,12 @@ def load_index(index_dir: Path) -> FAISS:
 def load_bm25_corpus(index_dir: Path) -> list[Document]:
     """
     Load BM25 corpus from JSON file (bm25_corpus.json in index_dir).
+    Corpus is stored as list of dicts: [{"text": "...", "metadata": {...}}, ...]
     """
     corpus_path = index_dir / "bm25_corpus.json"
-    corpus_data = json.loads(corpus_path.read_text(encoding="utf-8"))
+    corpus_data: list[dict] = json.loads(corpus_path.read_text(encoding="utf-8"))
     documents = [
-        Document(
-            page_content=item.get("text", item.get("page_content", "")),
-            metadata=item.get("metadata", {}),
-        )
+        Document(page_content=item["text"], metadata=item["metadata"])
         for item in corpus_data
     ]
     logger.info("Loaded %d documents from BM25 corpus", len(documents))
@@ -122,19 +119,7 @@ def main() -> None:
         required=True,
         help="Search query to test",
     )
-    parser.add_argument(
-        "--google_api_key",
-        type=str,
-        default=None,
-        help="Google API key for embeddings (defaults to GOOGLE_API_KEY env var)",
-    )
-
     args = parser.parse_args()
-
-    api_key = args.google_api_key or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        print("Error: Google API key required via --google_api_key or GOOGLE_API_KEY env var")
-        sys.exit(1)
 
     index_dir = Path(args.index_dir)
     if not index_dir.exists():

@@ -38,6 +38,9 @@ requirements_fixed.txt
 Thumbs.db
 .DS_Store
 
+# Chunk cache (resumable ingestion)
+.chunks_cache/
+
 # Logs
 *.log
 *.err
