@@ -1,75 +1,331 @@
 """
-Simplified LLM selector: Groq primary -> Gemini fallback, no rotation.
+Model Selector for intelligent LLM fallback with rotation and multi-key support.
 """
+import time
 import logging
-from httpx import ConnectError
+from typing import List, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
-from groq import RateLimitError, APITimeoutError
+from groq import RateLimitError, APIStatusError, APITimeoutError
+from google.api_core.exceptions import GoogleAPIError
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
 
 logger = logging.getLogger(__name__)
-
 
 class LLMExhaustedError(Exception):
     """Raised when all available LLM providers are exhausted"""
     pass
 
-
 class ModelSelector:
     """
-    Try Groq first; if RateLimitError/APITimeoutError/ConnectError,
-    log event=groq_fallback and try Gemini.
+    Intelligent model selector that rotates through available models and API keys
+    based on quotas, rate limits, and errors.
+
+    Rotation: primary provider switches every 2 queries (Gemini <-> Groq).
+    Key rotation: within a provider, keys are tried sequentially on quota errors.
     """
+
     def __init__(
         self,
-        groq_api_key: str,
-        gemini_api_key: str,
-        groq_model: str = "llama-3.3-70b-versatile",
-        gemini_model: str = "gemini-1.5-flash",
-        groq_timeout: int = 45,
+        gemini_models: List[str],
+        groq_models: List[str],
+        gemini_api_keys: List[str],
+        groq_api_keys: List[str],
+        query_count: int = 0,
+        max_retries_per_model: int = 2,
+        cooldown_seconds: int = 30
     ):
-        self.groq_api_key = groq_api_key
-        self.gemini_api_key = gemini_api_key
-        self.groq_model = groq_model
-        self.gemini_model = gemini_model
-        self.groq_timeout = groq_timeout
+        self.gemini_models = gemini_models
+        self.groq_models = groq_models
+        self.gemini_api_keys = gemini_api_keys
+        self.groq_api_keys = groq_api_keys
+        self.query_count = query_count
+        self.max_retries_per_model = max_retries_per_model
+        self.cooldown_seconds = cooldown_seconds
 
-    def invoke_with_fallback(self, messages):
-        # 1. Groq (primary)
-        logger.info("event=llm_attempt provider=groq model=%s", self.groq_model)
-        try:
-            llm = ChatGroq(
-                model=self.groq_model,
-                temperature=0,
-                api_key=self.groq_api_key,
-                timeout=self.groq_timeout,
-            )
-            result = llm.invoke(messages)
-            logger.info("event=llm_groq_success model=%s", self.groq_model)
-            return result
-        except (RateLimitError, APITimeoutError, ConnectError) as e:
+        # Per-model states
+        self.model_states = {}
+        for model in gemini_models:
+            self.model_states[model] = {
+                'retries': 0,
+                'last_error_time': 0,
+                'is_exhausted': False,
+                'provider': 'gemini'
+            }
+        for model in groq_models:
+            self.model_states[model] = {
+                'retries': 0,
+                'last_error_time': 0,
+                'is_exhausted': False,
+                'provider': 'groq'
+            }
+
+        # Per-provider key states
+        self.key_states = {}
+        for provider, keys in [('gemini', gemini_api_keys), ('groq', groq_api_keys)]:
+            self.key_states[provider] = {
+                'keys': keys,
+                'current_index': 0,
+                'exhausted': [False] * len(keys),
+                'last_error_time': [0] * len(keys),
+                'retries': [0] * len(keys),
+            }
+
+        self.last_provider: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Model state helpers
+    # ------------------------------------------------------------------
+
+    def _is_model_available(self, model_name: str) -> bool:
+        """Check if a model is available (not exhausted or in cooldown)"""
+        state = self.model_states.get(model_name)
+        if not state:
+            return False
+        if state['is_exhausted']:
+            if time.time() - state['last_error_time'] > self.cooldown_seconds:
+                state['is_exhausted'] = False
+                state['retries'] = 0
+                logger.info(f"Model {model_name} cooldown expired, making available again")
+                return True
+            return False
+        return True
+
+    def _get_next_available_model(self, provider: str) -> Optional[str]:
+        """Get the next available model for a given provider"""
+        models = self.gemini_models if provider == 'gemini' else self.groq_models
+        for model in models:
+            if self._is_model_available(model):
+                return model
+        return None
+
+    def _mark_model_exhausted(self, model_name: str, error: Exception):
+        """Mark a model as exhausted"""
+        state = self.model_states.get(model_name)
+        if state:
+            state['is_exhausted'] = True
+            state['last_error_time'] = time.time()
+            state['retries'] += 1
             logger.warning(
-                "event=groq_fallback model=%s error=%s",
-                self.groq_model,
-                type(e).__name__,
+                f"event=llm_model_exhausted model={model_name} provider={state['provider']} error={type(error).__name__}"
             )
 
-        # 2. Gemini (fallback)
-        logger.info("event=llm_attempt provider=gemini model=%s", self.gemini_model)
-        try:
-            llm = ChatGoogleGenerativeAI(
-                model=self.gemini_model,
+    # ------------------------------------------------------------------
+    # Key state helpers
+    # ------------------------------------------------------------------
+
+    def _is_key_available(self, provider: str, key_index: int) -> bool:
+        """Check if a key is available (not exhausted or cooldown expired)"""
+        state = self.key_states.get(provider)
+        if not state or key_index >= len(state['keys']):
+            return False
+        if state['exhausted'][key_index]:
+            if time.time() - state['last_error_time'][key_index] > self.cooldown_seconds:
+                state['exhausted'][key_index] = False
+                state['retries'][key_index] = 0
+                logger.info(f"Key {key_index} for {provider} cooldown expired, available again")
+                return True
+            return False
+        return True
+
+    def _get_active_key(self, provider: str) -> tuple:
+        """Return (key_index, key_string) for the first available key, or (None, None)."""
+        state = self.key_states.get(provider)
+        if not state or not state['keys']:
+            return None, None
+        start = state['current_index']
+        n = len(state['keys'])
+        for offset in range(n):
+            idx = (start + offset) % n
+            if self._is_key_available(provider, idx):
+                state['current_index'] = idx
+                return idx, state['keys'][idx]
+        return None, None
+
+    def _mark_key_exhausted(self, provider: str, key_index: int):
+        """Mark a specific API key as exhausted"""
+        state = self.key_states.get(provider)
+        if state and key_index < len(state['keys']):
+            state['exhausted'][key_index] = True
+            state['last_error_time'][key_index] = time.time()
+            state['retries'][key_index] += 1
+            logger.info(f"event=llm_key_exhausted provider={provider} key={key_index}")
+
+    # ------------------------------------------------------------------
+    # Quota / rate limit detection
+    # ------------------------------------------------------------------
+
+    def _is_quota_or_rate_error(self, error: Exception) -> bool:
+        """Check if error is related to quota or rate limits"""
+        error_str = str(error).lower()
+        error_type = type(error).__name__
+
+        quota_indicators = [
+            'resource_exhausted', 'quota', '429', 'rate_limit',
+            'ratelimit', 'exceeded', 'limit exceeded', 'too many requests'
+        ]
+        quota_exception_types = ['ResourceExhausted', 'RateLimitError', 'APIStatusError']
+
+        if error_type in quota_exception_types:
+            if error_type == 'APIStatusError':
+                if hasattr(error, 'code') and str(error.code) in ['429', '503']:
+                    return True
+                if any(indicator in error_str for indicator in quota_indicators):
+                    return True
+            else:
+                return True
+
+        if any(indicator in error_str for indicator in quota_indicators):
+            return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # LLM instance factory
+    # ------------------------------------------------------------------
+
+    def _create_llm_instance(self, model_name: str, provider: str, api_key: str):
+        """Create an LLM instance for the given model, provider, and API key"""
+        if provider == 'gemini':
+            return ChatGoogleGenerativeAI(
+                model=model_name,
                 temperature=0,
                 google_api_key=api_key,
             )
-            result = llm.invoke(messages)
-            logger.info("event=llm_gemini_success model=%s", self.gemini_model)
-            return result
-        except Exception as e:
-            logger.error(
-                "event=llm_all_providers_exhausted error=%s",
-                type(e).__name__,
+        elif provider == 'groq':
+            return ChatGroq(
+                model=model_name,
+                temperature=0,
+                api_key=api_key,
+                timeout=45,
             )
+        raise ValueError(f"Unknown provider: {provider}")
+
+    # ------------------------------------------------------------------
+    # Invoke with fallback
+    # ------------------------------------------------------------------
+
+    def invoke_with_fallback(self, messages):
+        """
+        Invoke LLM with intelligent fallback, model rotation, and key rotation.
+
+        Primary provider rotates every 2 queries.
+        Within a provider, keys are tried in round-robin on quota errors.
+        Only when all keys are exhausted does it mark the model exhausted.
+        """
+        last_error = None
+        providers = ['gemini', 'groq']
+        shift = (self.query_count // 2) % len(providers)
+        ordered_providers = providers[shift:] + providers[:shift]
+
+        for provider in ordered_providers:
+            model_list_len = len(self.gemini_models if provider == 'gemini' else self.groq_models)
+
+            for attempt in range(model_list_len):
+                model_name = self._get_next_available_model(provider)
+                if not model_name:
+                    logger.warning(f"event=llm_no_available_models provider={provider}")
+                    break
+
+                # Try each key for this model before giving up
+                while True:
+                    key_idx, api_key = self._get_active_key(provider)
+                    if key_idx is None:
+                        logger.warning(f"event=llm_no_available_keys provider={provider} model={model_name}")
+                        self._mark_model_exhausted(model_name, Exception("All keys exhausted"))
+                        break
+
+                    try:
+                        logger.info(f"event=llm_attempt model={model_name} provider={provider} key={key_idx}")
+                        llm_start = time.monotonic()
+                        llm = self._create_llm_instance(model_name, provider, api_key)
+                        result = llm.invoke(messages)
+                        elapsed = time.monotonic() - llm_start
+                        logger.info(
+                            f"event=llm_success model={model_name} provider={provider} key={key_idx} elapsed_s={elapsed:.2f}"
+                        )
+                        self.last_provider = f"{provider.capitalize()} ({model_name})"
+                        return result
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(
+                            f"event=llm_failed model={model_name} provider={provider} key={key_idx} error={type(e).__name__}"
+                        )
+
+                        if self._is_quota_or_rate_error(e):
+                            self._mark_key_exhausted(provider, key_idx)
+                            continue  # try next key with same model
+                        else:
+                            self._mark_model_exhausted(model_name, e)
+                            break  # non-quota error, try next model
+
+        logger.error("event=llm_all_models_exhausted")
+        if last_error:
             raise LLMExhaustedError(
-                f"All LLM providers exhausted. Last error: {type(e).__name__}: {e}"
+                f"All LLM providers exhausted. Last error: {type(last_error).__name__}: {str(last_error)}"
             )
+        raise LLMExhaustedError("All LLM providers are unavailable")
+
+    # ------------------------------------------------------------------
+    # Stream with fallback
+    # ------------------------------------------------------------------
+
+    def stream_with_fallback(self, messages):
+        """
+        Stream LLM response with intelligent fallback, model rotation, and key rotation.
+        """
+        last_error = None
+        providers = ['gemini', 'groq']
+        shift = (self.query_count // 2) % len(providers)
+        ordered_providers = providers[shift:] + providers[:shift]
+
+        for provider in ordered_providers:
+            model_list_len = len(self.gemini_models if provider == 'gemini' else self.groq_models)
+
+            for attempt in range(model_list_len):
+                model_name = self._get_next_available_model(provider)
+                if not model_name:
+                    logger.warning(f"event=llm_no_available_models provider={provider}")
+                    break
+
+                while True:
+                    key_idx, api_key = self._get_active_key(provider)
+                    if key_idx is None:
+                        logger.warning(f"event=llm_no_available_keys provider={provider} model={model_name}")
+                        self._mark_model_exhausted(model_name, Exception("All keys exhausted"))
+                        break
+
+                    try:
+                        logger.info(f"event=llm_stream_attempt model={model_name} provider={provider} key={key_idx}")
+                        llm = self._create_llm_instance(model_name, provider, api_key)
+                        stream_iter = llm.stream(messages)
+                        first_chunk = next(stream_iter)
+
+                        logger.info(f"event=llm_stream_success model={model_name} provider={provider} key={key_idx}")
+                        self.last_provider = f"{provider.capitalize()} ({model_name})"
+
+                        yield first_chunk
+                        yield from stream_iter
+                        return
+                    except StopIteration:
+                        self.last_provider = f"{provider.capitalize()} ({model_name})"
+                        return
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(
+                            f"event=llm_stream_failed model={model_name} provider={provider} key={key_idx} error={type(e).__name__}"
+                        )
+
+                        if self._is_quota_or_rate_error(e):
+                            self._mark_key_exhausted(provider, key_idx)
+                            continue
+                        else:
+                            self._mark_model_exhausted(model_name, e)
+                            break
+
+        logger.error("event=llm_all_models_exhausted (streaming)")
+        if last_error:
+            raise LLMExhaustedError(
+                f"All LLM providers exhausted. Last error: {type(last_error).__name__}: {str(last_error)}"
+            )
+        raise LLMExhaustedError("All LLM providers are unavailable")
