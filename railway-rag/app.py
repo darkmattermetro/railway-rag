@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import time
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -51,7 +52,8 @@ GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT: int = 45
 GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
 RERANKER_MODEL: str = "ms-marco-MiniLM-L-12-v2"
-RERANKER_TOP_N: int = 15
+RERANKER_TOP_N: int = 8
+MAX_CITATION_EXPANDERS: int = 5
 INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
 _ENC = tiktoken.get_encoding("cl100k_base")
 
@@ -60,6 +62,16 @@ _ENC = tiktoken.get_encoding("cl100k_base")
 # ----------------------------------------------------------------------------
 def _token_length(text: str) -> int:
     return len(_ENC.encode(text))
+
+
+def _calculate_text_overlap(text1: str, text2: str) -> float:
+    """Calculates a simple word-overlap score between two strings."""
+    import re
+    words1 = set(re.findall(r"\b[a-z0-9]+\b", text1.lower()))
+    words2 = set(re.findall(r"\b[a-z0-9]+\b", text2.lower()))
+    if not words1 or not words2:
+        return 0.0
+    return len(words1 & words2) / max(len(words1), len(words2))
 
 
 @st.cache_resource
@@ -128,8 +140,14 @@ def main() -> None:
     # --------------------------------------------------------------------
     # Secrets (read once in main, not at module scope)
     # --------------------------------------------------------------------
-    groq_api_key: str = st.secrets["GROQ_API_KEY"]
-    gemini_api_key: str = st.secrets["GEMINI_API_KEY"]
+    # Parse API keys with backward compatibility for legacy single-key format
+    gemini_keys = st.secrets.get("gemini", {}).get("api_keys", [])
+    if not gemini_keys and "GEMINI_API_KEY" in st.secrets:
+        gemini_keys = [st.secrets["GEMINI_API_KEY"]]
+
+    groq_keys = st.secrets.get("groq", {}).get("api_keys", [])
+    if not groq_keys and "GROQ_API_KEY" in st.secrets:
+        groq_keys = [st.secrets["GROQ_API_KEY"]]
 
     # --------------------------------------------------------------------
     # Session state initialization
@@ -140,6 +158,8 @@ def main() -> None:
         st.session_state.last_query_time = 0.0
     if "current_index" not in st.session_state:
         st.session_state.current_index = None
+    if "query_count" not in st.session_state:
+        st.session_state.query_count = 0
 
     # --------------------------------------------------------------------
     # UI Layout
@@ -216,6 +236,21 @@ def main() -> None:
     [data-testid="stSidebar"] .stSelectbox label { font-size: 0.85rem; font-weight: 500; color: #1A1A2E; }
 
     .stAlert { border-left: 3px solid #003366; background: #F0F4F8; border-radius: 4px; }
+
+    .ai-inferred {
+        background-color: #FFF3CD;
+        border-left: 4px solid #FFC107;
+        padding: 0.75rem 1rem;
+        margin: 0.75rem 0;
+        border-radius: 4px;
+        color: #856404;
+        font-size: 0.95rem;
+        line-height: 1.5;
+    }
+    .ai-inferred strong {
+        color: #664D03;
+        margin-right: 0.25rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -269,7 +304,10 @@ def main() -> None:
     # --------------------------------------------------------------------
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(message["content"], unsafe_allow_html=True)
+
+    if last_llm := st.session_state.get("last_llm"):
+        st.caption(f"{last_llm}")
 
     # --------------------------------------------------------------------
     # Query handling
@@ -284,8 +322,12 @@ def main() -> None:
             st.warning("Please wait a moment before submitting another query.")
             st.stop()
         st.session_state.last_query_time = time.time()
+        
+        # Increment global query count for model rotation
+        current_query_count = st.session_state.query_count
+        st.session_state.query_count += 1
 
-        logger.info("event=query_received query_len=%d", len(user_query))
+        logger.info("event=query_received query_len=%d query_count=%d", len(user_query), current_query_count)
 
         # Add user message to history
         st.session_state.messages.append({"role": "user", "content": user_query})
@@ -298,13 +340,14 @@ def main() -> None:
         # Get model lists from secrets with fallbacks to original values
         gemini_models = st.secrets.get("GEMINI_MODELS", [GEMINI_PRIMARY_MODEL])
         groq_models = st.secrets.get("GROQ_MODELS", [GROQ_FALLBACK_MODEL])
-        
-        # Initialize model selector
+
+        # Initialize model selector, passing the query count for rotation logic
         llm_selector = ModelSelector(
             gemini_models=gemini_models,
             groq_models=groq_models,
-            gemini_api_key=gemini_api_key,
-            groq_api_key=groq_api_key
+            gemini_api_keys=gemini_keys,
+            groq_api_keys=groq_keys,
+            query_count=current_query_count
         )
 
         with st.chat_message("assistant"):
@@ -407,11 +450,10 @@ def main() -> None:
                 "Search across all available context blocks — they may come from "
                 "multiple documents. Synthesize information from all relevant sources.\n\n"
                 "If information is not directly in context, you may make reasonable "
-                "inferences based on related content. Indicate when you are inferring.\n\n"
+                "inferences based on related content. You MUST wrap any inferred information inside <inferred> and </inferred> tags.\n\n"
                 "Never fabricate metrics, speeds, telemetry, or calculations.\n\n"
                 "Examples:\n"
-                "- Acceptable: 'The signal head is approximately 2.5m high (inferred "
-                "from mast dimensions on page 8).'\n"
+                "- Acceptable: '<inferred>The signal head is approximately 2.5m high (based on mast dimensions on page 8).</inferred>'\n"
                 "- NOT acceptable: Making up a speed value, clearance point, or "
                 "measurement not found anywhere in the provided documents.\n\n"
                 "Synthesize the information. Do NOT repeat the same point "
@@ -444,9 +486,29 @@ def main() -> None:
             t_llm_start: float = time.monotonic()
 
             try:
-                result = llm_selector.invoke_with_fallback(messages)
-                full_response = result.content
-                # Note: Success logging is now handled inside ModelSelector.invoke_with_fallback
+                stream_generator = llm_selector.stream_with_fallback(messages)
+                
+                # Stream the response chunk by chunk to Streamlit
+                stream_text = ""
+                for chunk in stream_generator:
+                    stream_text += chunk.content
+                    
+                    # Intercept `<used_chunks>` from display buffer so it doesn't render live
+                    display_text = re.sub(r'<used_chunks>.*', '', stream_text, flags=re.DOTALL)
+                    
+                    # Format <inferred> blocks live if they exist
+                    display_text = re.sub(
+                        r'<inferred>(.*?)</inferred>',
+                        r'<div class="ai-inferred"><strong>AI Gen:</strong>\1</div>',
+                        display_text,
+                        flags=re.IGNORECASE | re.DOTALL
+                    )
+                    
+                    response_placeholder.markdown(display_text + "▌", unsafe_allow_html=True)
+                
+                full_response = stream_text
+                st.session_state.last_llm = llm_selector.last_provider
+                # Note: Success logging is now handled inside ModelSelector.stream_with_fallback
             except LLMExhaustedError as e:
                 logger.error(
                     "event=llm_all_providers_exhausted error=%s",
@@ -467,13 +529,40 @@ def main() -> None:
             # ----------------------------------------------------------------
             display_response, chunk_indices = parse_citations(full_response)
 
+            display_response = re.sub(
+                r'<inferred>(.*?)</inferred>',
+                r'<div class="ai-inferred"><strong>AI Gen:</strong>\1</div>',
+                display_response,
+                flags=re.IGNORECASE | re.DOTALL
+            )
+
+            # Select top N most relevant citations based on word overlap with the response
+            # 1. Filter valid indices
+            valid_indices = [idx for idx in chunk_indices if 0 <= idx < len(reranked_docs)]
+
+            # 2. Score and Rank
+            if valid_indices:
+                # Calculate scores and store as (score, original_index)
+                scored_indices = []
+                for idx in valid_indices:
+                    score = _calculate_text_overlap(display_response, reranked_docs[idx].page_content)
+                    scored_indices.append((score, idx))
+                
+                # Sort by score (descending), then by original index (ascending) for stability
+                scored_indices.sort(key=lambda x: (-x[0], x[1]))
+                
+                # 3. Select top N
+                final_indices = [idx for score, idx in scored_indices[:MAX_CITATION_EXPANDERS]]
+            else:
+                final_indices = []
+
             # Display the answer
-            response_placeholder.markdown(display_response)
+            response_placeholder.markdown(display_response, unsafe_allow_html=True)
 
             # Render LLM-tagged citations with expandable chunk text
             seen_citations: set[str] = set()
             ref_num = 1  # Reference counter starting at 1
-            for idx in chunk_indices:
+            for idx in final_indices:
                 if 0 <= idx < len(reranked_docs):
                     doc = reranked_docs[idx]
                     source: str = doc.metadata.get("source", "unknown")
