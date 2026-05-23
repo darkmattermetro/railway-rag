@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Streamlit Cloud Retrieval Application for Railway RAG Pipeline.
 
-Hybrid retrieval with FAISS + BM25, FlashRank reranking, and LLM generation.
+FAISS similarity search with score-weighted context allocation.
 Runs within ~1 GB RAM constraint on Streamlit Cloud.
 """
 
-import gc
 import hashlib
-import json
 import logging
 import time
 import re
@@ -15,9 +13,6 @@ from pathlib import Path
 
 import streamlit as st
 import tiktoken
-from langchain_classic.retrievers import ContextualCompressionRetriever, EnsembleRetriever
-from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
-from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -51,7 +46,6 @@ COOLDOWN_SECONDS: float = 1.0
 GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT: int = 45
 GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
-RERANKER_MODEL: str = "ms-marco-MiniLM-L-12-v2"
 RERANKER_TOP_N: int = 8
 MAX_CITATION_EXPANDERS: int = 5
 INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
@@ -92,30 +86,6 @@ def load_vector_index(index_path: Path) -> FAISS:
         allow_dangerous_deserialization=True,
     )
     return vector_store
-
-
-@st.cache_resource
-def load_bm25_corpus(index_dir: Path) -> tuple[BM25Retriever | None, bool]:
-    """Load BM25 corpus from JSON file. Returns (retriever, available_flag)."""
-    corpus_path: Path = index_dir / "bm25_corpus.json"
-    if not corpus_path.exists():
-        logger.warning("event=bm25_missing index=%s", index_dir.name)
-        return None, False
-
-    with open(corpus_path, "r", encoding="utf-8") as f:
-        corpus_data: list[dict] = json.load(f)
-
-    bm25_docs: list[Document] = [
-        Document(page_content=item["text"], metadata=item["metadata"])
-        for item in corpus_data
-    ]
-    del corpus_data
-    gc.collect()
-
-    bm25_retriever = BM25Retriever.from_documents(bm25_docs)
-    bm25_retriever.k = RETRIEVAL_K
-    logger.info("event=bm25_loaded index=%s docs=%d", index_dir.name, len(bm25_docs))
-    return bm25_retriever, True
 
 
 def discover_indices() -> list[Path]:
@@ -166,7 +136,7 @@ def main() -> None:
     # --------------------------------------------------------------------
     st.set_page_config(
         page_title="DMRC Document Search",
-        page_icon="ðŸ“„",
+        page_icon="=ƒôä",
         layout="wide",
     )
 
@@ -257,7 +227,7 @@ def main() -> None:
     st.markdown("""
 <div class="dmrc-header">
     <h1>DMRC Document Search Engine</h1>
-    <p class="subtitle">Delhi Metro Rail Corporation â€” Intelligent Document Search</p>
+    <p class="subtitle">Delhi Metro Rail Corporation GÇö Intelligent Document Search</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -288,16 +258,11 @@ def main() -> None:
             st.session_state.messages = []
             st.session_state.current_index = selected_index_name
 
-        # Load index and BM25
+        # Load index
         with st.spinner("Loading..."):
             vector_store = load_vector_index(selected_index_path)
             faiss_docs_count: int = vector_store.index.ntotal
             logger.info("event=index_loaded index=%s faiss_docs=%d", selected_index_name, faiss_docs_count)
-
-        bm25_retriever, bm25_available = load_bm25_corpus(selected_index_path)
-
-        if not bm25_available:
-            logger.warning("event=bm25_missing index=%s", selected_index_name)
 
     # --------------------------------------------------------------------
     # Chat history display
@@ -355,85 +320,46 @@ def main() -> None:
             response_placeholder.markdown('<div class="status-msg">Searching documents...</div>', unsafe_allow_html=True)
 
             # ----------------------------------------------------------------
-            # Setup retrievers
+            # Retrieval via FAISS direct similarity
             # ----------------------------------------------------------------
-            faiss_retriever = vector_store.as_retriever(search_kwargs={"k": RETRIEVAL_K})
+            docs_with_scores = vector_store.similarity_search_with_score(user_query, k=RETRIEVAL_K)
+            raw_docs = [doc for doc, _score in docs_with_scores]
 
-            if bm25_available:
-                ensemble_retriever = EnsembleRetriever(
-                    retrievers=[faiss_retriever, bm25_retriever],
-                    weights=[0.3, 0.7],
-                )
-                active_retriever = ensemble_retriever
-            else:
-                active_retriever = faiss_retriever
-
-            # ----------------------------------------------------------------
-            # Reranking setup
-            # ----------------------------------------------------------------
-            reranker = FlashrankRerank(
-                model=RERANKER_MODEL,
-                top_n=RERANKER_TOP_N,
-            )
-            compression_retriever = ContextualCompressionRetriever(
-                base_compressor=reranker,
-                base_retriever=active_retriever,
-            )
-
-            # ----------------------------------------------------------------
-            # Retrieval
-            # ----------------------------------------------------------------
-            retrieved_docs: list[Document] = compression_retriever.invoke(user_query)
-            raw_count: int = len(retrieved_docs)
-
-            # ----------------------------------------------------------------
-            # Deduplication
-            # ----------------------------------------------------------------
-            deduped_docs = deduplicate_chunks(retrieved_docs)
-            deduped_count: int = len(deduped_docs)
-
-            # Source diversity: max 2 chunks per (source, page) pair
+            deduped_docs = deduplicate_chunks(raw_docs)
             diverse_docs = apply_source_diversity(deduped_docs, max_per_page=2)
-            diverse_count: int = len(diverse_docs)
-            logger.info(
-                "event=dedup_complete before=%d deduped=%d diverse=%d",
-                raw_count,
-                deduped_count,
-                diverse_count,
-            )
-
             reranked_docs: list[Document] = diverse_docs[:RERANKER_TOP_N]
-            reranked_count: int = len(reranked_docs)
+
             logger.info(
-                "event=retrieval_complete raw=%d deduped=%d diverse=%d reranked=%d",
-                raw_count,
-                deduped_count,
-                diverse_count,
-                reranked_count,
+                "event=retrieval_complete raw=%d deduped=%d diverse=%d final=%d",
+                len(raw_docs),
+                len(deduped_docs),
+                len(diverse_docs),
+                len(reranked_docs),
             )
 
             # ----------------------------------------------------------------
-            # Token budget protection
+            # Score-weighted token budget
+            #   Rank 1-2: full chunk text
+            #   Rank 3-4: up to 60% of chunk
+            #   Rank 5-6: up to 35% of chunk
+            #   Rank 7-8: up to 25% of chunk
             # ----------------------------------------------------------------
+            chunk_weights = [1.0, 1.0, 0.6, 0.6, 0.35, 0.35, 0.25, 0.25]
             context_parts: list[str] = []
             total_tokens: int = 0
 
             for i, doc in enumerate(reranked_docs):
-                chunk_tokens: int = _token_length(doc.page_content)
-                if total_tokens + chunk_tokens > TOKEN_BUDGET:
-                    remaining: int = TOKEN_BUDGET - total_tokens
-                    truncated_text: str = _ENC.decode(_ENC.encode(doc.page_content)[:remaining])
-                    context_parts.append(truncated_text)
-                    total_tokens += remaining
-                    logger.info(
-                        "event=token_budget_truncated chunk=%d remaining=%d total=%d",
-                        i,
-                        remaining,
-                        total_tokens,
-                    )
+                if i >= len(chunk_weights) or total_tokens >= TOKEN_BUDGET:
                     break
-                context_parts.append(doc.page_content)
-                total_tokens += chunk_tokens
+                chunk_tokens: int = _token_length(doc.page_content)
+                alloc: int = min(chunk_tokens, int(TOKEN_BUDGET * chunk_weights[i]), TOKEN_BUDGET - total_tokens)
+                if alloc <= 0:
+                    break
+                if alloc >= chunk_tokens:
+                    context_parts.append(doc.page_content)
+                else:
+                    context_parts.append(_ENC.decode(_ENC.encode(doc.page_content)[:alloc]))
+                total_tokens += alloc
 
             logger.info(
                 "event=context_built chunks=%d tokens=%d",
@@ -447,7 +373,7 @@ def main() -> None:
             SYSTEM_PROMPT: str = (
                 "You are a technical rail analyst for DMRC.\n"
                 "Answer using the provided context blocks as your primary source.\n"
-                "Search across all available context blocks â€” they may come from "
+                "Search across all available context blocks GÇö they may come from "
                 "multiple documents. Synthesize information from all relevant sources.\n\n"
                 "If information is not directly in context, you may make reasonable "
                 "inferences based on related content. You MUST wrap any inferred information inside <inferred> and </inferred> tags.\n\n"
@@ -457,11 +383,11 @@ def main() -> None:
                 "- NOT acceptable: Making up a speed value, clearance point, or "
                 "measurement not found anywhere in the provided documents.\n\n"
                 "Synthesize the information. Do NOT repeat the same point "
-                "multiple times â€” if multiple chunks contain the same "
+                "multiple times GÇö if multiple chunks contain the same "
                 "information, state it once.\n\n"
                 "At the end of your answer append:\n"
                 "<used_chunks>[0, 2]</used_chunks>\n\n"
-                "The values inside used_chunks must be integers only â€” "
+                "The values inside used_chunks must be integers only GÇö "
                 "not ranges, not strings."
             )
 
@@ -504,7 +430,7 @@ def main() -> None:
                         flags=re.IGNORECASE | re.DOTALL
                     )
                     
-                    response_placeholder.markdown(display_text + "â–Œ", unsafe_allow_html=True)
+                    response_placeholder.markdown(display_text + "Gûî", unsafe_allow_html=True)
                 
                 full_response = stream_text
                 st.session_state.last_llm = llm_selector.last_provider
@@ -574,7 +500,7 @@ def main() -> None:
                             f"**Refer {ref_num}**",
                             expanded=False,
                         ):
-                            st.caption(f"{source} â€” Page {page}")
+                            st.caption(f"{source} GÇö Page {page}")
                             st.text(doc.page_content)
                         ref_num += 1
 
