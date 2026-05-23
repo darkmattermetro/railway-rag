@@ -1,7 +1,7 @@
 """
 Tests for the OCR silent failure detection logic from local_builder.py (§2.9)
 """
-from local_builder import (
+from ingest import (
     _should_trigger_ocr_fallback,
     OCR_MIN_TEXT_LEN,
     OCR_GARBAGE_RATIO_THRESHOLD,

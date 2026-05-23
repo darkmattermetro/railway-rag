@@ -1,192 +1,476 @@
-"""Shared ingestion pipeline for local_builder.py and build_index.py."""
-
+"""Ingestion pipeline for Railway RAG."""
 import gc
 import hashlib
+import io
 import json
 import logging
 import os
-import time
+import re
+import tempfile
+import uuid
+import shutil
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Iterator, Callable
+from datetime import datetime, timezone
 
+import numpy as np
+import pypdf
+import pypdfium2 as pdfium
+import tiktoken
 import torch
+
+from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import MarkdownTextSplitter
+
+from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import OcrAutoOptions, PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.types.doc import DoclingDocument, SectionHeaderItem, TableItem, TextItem
 
 logger = logging.getLogger(__name__)
 
+# Paths
+_BUILD_DIR = Path(__file__).resolve().parent / "vector_indices"
+_CACHE_DIR = _BUILD_DIR / ".chunks_cache"
 
-def build_and_save_index(
-    all_chunks: list[Document],
-    category: str,
-) -> Path:
-    from langchain_community.vectorstores import FAISS
-    from langchain_huggingface import HuggingFaceEmbeddings
-    from local_builder import EMBEDDING_MODEL
+# Constants
+EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"
+CHUNK_SIZE_TOKENS: int = 512
+CHUNK_OVERLAP_TOKENS: int = 200
+CHUNK_SIZE_CHARS: int = 2000
+CHUNK_OVERLAP_CHARS: int = 300
 
-    # Rule 1.2: import error propagates naturally to caller's RuntimeError handler
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+OCR_MIN_TEXT_LEN: int = 20
+OCR_GARBAGE_RATIO_THRESHOLD: float = 0.4
+HAS_CUDA: bool = torch.cuda.is_available()
 
-    # Create vector store from documents
+# Page dimension thresholds for GPU sizing check (~A1 paper = 1684 x 2384 pt)
+# Pages exceeding 2000pt in any dimension skip GPU to prevent OOM
+MAX_PAGE_WIDTH_PT: int = 2000
+MAX_PAGE_HEIGHT_PT: int = 2000
+
+# --- State & Caching ---
+
+def _get_file_hash(pdf_path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(pdf_path, 'rb') as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+def _save_chunks_cache(file_hash: str, chunks: List[Document]):
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _CACHE_DIR / f"{file_hash}.json"
+    data = [{"page_content": c.page_content, "metadata": c.metadata} for c in chunks]
+    cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+def _load_chunks_cache(file_hash: str) -> Optional[List[Document]]:
+    cache_path = _CACHE_DIR / f"{file_hash}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        return [Document(page_content=d["page_content"], metadata=d["metadata"]) for d in data]
+    except Exception as e:
+        logger.warning(f"Failed to load cache from {cache_path}: {e}")
+        return None
+
+def read_ingest_state(category: str) -> dict:
+    state_file = _BUILD_DIR / f".ingest_state_{category}.json"
+    if state_file.exists():
+        try:
+            return json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"Failed to load state from {state_file}: {e}")
+    return {"completed_files": [], "total_files": 0}
+
+def _write_ingest_state(category: str, state: dict):
+    _BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    state_file = _BUILD_DIR / f".ingest_state_{category}.json"
+    state_file.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+def clear_cache(category: str, delete_chunks: bool = False):
+    state_file = _BUILD_DIR / f".ingest_state_{category}.json"
+    if state_file.exists():
+        state_file.unlink()
+    if delete_chunks and _CACHE_DIR.exists():
+        shutil.rmtree(_CACHE_DIR, ignore_errors=True)
+
+# --- Docling Processing ---
+
+class _MergedDocument:
+    def __init__(self):
+        self.items = []
+
+    def add_page_doc(self, p_doc: DoclingDocument, page_no: int):
+        for item, level in p_doc.iterate_items():
+            if hasattr(item, "prov") and item.prov:
+                for p in item.prov:
+                    p.page_no = page_no
+            self.items.append((item, level))
+
+    def iterate_items(self):
+        return iter(self.items)
+
+def build_pipeline_options(device: AcceleratorDevice) -> PdfPipelineOptions:
+    num_threads = 2 if device == AcceleratorDevice.CPU else 1
+    return PdfPipelineOptions(
+        accelerator_options=AcceleratorOptions(
+            device=device,
+            num_threads=num_threads,
+        ),
+        do_ocr=True,
+        ocr_options=OcrAutoOptions(force_full_page_ocr=False),
+        ocr_batch_size=1,
+        layout_batch_size=1,
+        table_batch_size=1,
+    )
+
+def _split_pdf_pages(pdf_path: Path, tmp_dir: Path) -> Iterator[tuple[int, Path, int]]:
+    reader = pypdf.PdfReader(pdf_path)
+    total_pages = len(reader.pages)
+    for i, page in enumerate(reader.pages):
+        writer = pypdf.PdfWriter()
+        writer.add_page(page)
+        tmp_path = tmp_dir / f"page_{i+1}.pdf"
+        with open(tmp_path, "wb") as out:
+            writer.write(out)
+        yield i + 1, tmp_path, total_pages
+
+class ConverterCache:
+    def __init__(self):
+        self.gpu_conv = None
+        self.cpu_conv = None
+        self.cpu_ocr_conv = None
+        self.gpu_ocr_conv = None
+        
+    def get_gpu(self):
+        if self.gpu_conv is None:
+            opts = build_pipeline_options(AcceleratorDevice.CUDA)
+            self.gpu_conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})
+        return self.gpu_conv
+        
+    def get_cpu(self):
+        if self.cpu_conv is None:
+            opts = build_pipeline_options(AcceleratorDevice.CPU)
+            self.cpu_conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})
+        return self.cpu_conv
+        
+    def get_cpu_ocr(self):
+        if self.cpu_ocr_conv is None:
+            opts = build_pipeline_options(AcceleratorDevice.CPU)
+            opts.ocr_options.force_full_page_ocr = True
+            self.cpu_ocr_conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})
+        return self.cpu_ocr_conv
+
+    def get_gpu_ocr(self):
+        if self.gpu_ocr_conv is None:
+            opts = build_pipeline_options(AcceleratorDevice.CUDA)
+            opts.ocr_options.force_full_page_ocr = True
+            self.gpu_ocr_conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})
+        return self.gpu_ocr_conv
+
+_CONVERTERS = ConverterCache()
+
+
+def _page_below_resolution_limit(page_path: Path, max_dim: int = MAX_PAGE_WIDTH_PT) -> bool:
+    """Check if a PDF page is small enough for GPU processing to avoid OOM."""
+    try:
+        doc = pdfium.PdfDocument(str(page_path))
+        if len(doc) == 0:
+            return False
+        w, h = doc.get_page_size(0)
+        return max(w, h) <= max_dim
+    except Exception:
+        return True  # safe default — let GPU try
+
+
+def _convert_page(page_path: Path, page_no: int, callback: Optional[Callable] = None) -> DoclingDocument:
+    if HAS_CUDA and _page_below_resolution_limit(page_path):
+        try:
+            converter = _CONVERTERS.get_gpu()
+            if callback: callback(page_no, "GPU", None)
+            return converter.convert(page_path).document
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower() or "alloc" in str(e).lower():
+                gc.collect()
+                torch.cuda.empty_cache()
+                if callback: callback(page_no, "CPU", "OOM")
+                converter = _CONVERTERS.get_cpu()
+                return converter.convert(page_path).document
+            else:
+                raise
+    else:
+        converter = _CONVERTERS.get_cpu()
+        if callback: callback(page_no, "CPU", None)
+        return converter.convert(page_path).document
+
+def _convert_page_force_ocr(page_path: Path, page_no: int, callback: Optional[Callable] = None) -> DoclingDocument:
+    if HAS_CUDA and _page_below_resolution_limit(page_path):
+        try:
+            converter = _CONVERTERS.get_gpu_ocr()
+            if callback: callback(page_no, "GPU", None)
+            return converter.convert(page_path).document
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower() or "alloc" in str(e).lower():
+                logger.warning("event=gpu_ocr_oom page=%d", page_no)
+                gc.collect()
+                torch.cuda.empty_cache()
+            else:
+                raise
+    converter = _CONVERTERS.get_cpu_ocr()
+    if callback: callback(page_no, "CPU", None)
+    return converter.convert(page_path).document
+
+def _should_trigger_ocr_fallback(page_text: str) -> bool:
+    if len(page_text) < OCR_MIN_TEXT_LEN and not re.search(r"[A-Za-z0-9]", page_text):
+        return True
+    clean = re.sub(r"[^a-zA-Z0-9\s#\-\|\*\_\`]", "", page_text)
+    garbage_ratio = 1.0 - (len(clean) / max(len(page_text), 1))
+    return garbage_ratio > OCR_GARBAGE_RATIO_THRESHOLD
+
+try:
+    _enc = tiktoken.get_encoding("cl100k_base")
+    def _token_length(text: str) -> int:
+        return len(_enc.encode(text))
+    GLOBAL_SPLITTER = MarkdownTextSplitter(
+        chunk_size=CHUNK_SIZE_TOKENS,
+        chunk_overlap=CHUNK_OVERLAP_TOKENS,
+        length_function=_token_length,
+    )
+except TypeError:
+    GLOBAL_SPLITTER = MarkdownTextSplitter(
+        chunk_size=CHUNK_SIZE_CHARS,
+        chunk_overlap=CHUNK_OVERLAP_CHARS,
+    )
+
+def extract_chunks(doc: _MergedDocument, filename: str, category: str) -> List[Document]:
+
+    chunks: list[Document] = []
+    prose_buffer: list[str] = []
+    buffer_page_no: int = 1
+    current_heading: str = "Introduction"
+    last_known_page: int = 1
+    last_element_was_table: bool = False
+    last_table_page: int = -1
+    last_table_heading: str = ""
+
+    def flush_prose_buffer():
+        nonlocal prose_buffer, buffer_page_no
+        if not prose_buffer:
+            return
+        full_prose = f"## {current_heading}\n\n" + "\n".join(prose_buffer)
+        prose_chunks = GLOBAL_SPLITTER.split_text(full_prose)
+        for prose_chunk in prose_chunks:
+            metadata = {
+                "source": filename,
+                "page_number": buffer_page_no,
+                "category": category,
+                "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
+                "is_table": False,
+                "is_table_continuation": False,
+            }
+            chunks.append(Document(page_content=prose_chunk, metadata=metadata))
+        prose_buffer = []
+        buffer_page_no = last_known_page
+
+    for element, level in doc.iterate_items():
+        try:
+            if hasattr(element, "prov") and element.prov:
+                page_no = element.prov[0].page_no
+                last_known_page = page_no
+            else:
+                page_no = last_known_page
+        except (IndexError, TypeError):
+            page_no = last_known_page
+
+        if isinstance(element, SectionHeaderItem):
+            flush_prose_buffer()
+            heading_text = element.text.strip() if element.text else ""
+            if heading_text:
+                metadata = {
+                    "source": filename,
+                    "page_number": last_known_page,
+                    "category": category,
+                    "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "is_table": False,
+                    "is_table_continuation": False,
+                    "is_section_header": True,
+                }
+                chunks.append(Document(page_content=f"## {heading_text}", metadata=metadata))
+            current_heading = heading_text
+            last_element_was_table = False
+
+        elif isinstance(element, TableItem):
+            flush_prose_buffer()
+            table_markdown = element.export_to_markdown().strip()
+            if not table_markdown:
+                last_element_was_table = False
+                continue
+
+            is_continuation = (
+                last_element_was_table
+                and current_heading == last_table_heading
+                and (page_no == last_table_page or page_no == last_table_page + 1)
+            )
+
+            metadata = {
+                "source": filename,
+                "page_number": page_no,
+                "category": category,
+                "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
+                "is_table": True,
+                "is_table_continuation": is_continuation,
+            }
+            contextual_table = f"### {current_heading}\n\n{table_markdown}"
+            chunks.append(Document(page_content=contextual_table, metadata=metadata))
+            last_element_was_table = True
+            last_table_page = page_no
+            last_table_heading = current_heading
+
+        elif isinstance(element, TextItem):
+            page_text = element.text.strip() if element.text else ""
+            if not page_text:
+                continue
+
+            if page_no != buffer_page_no:
+                flush_prose_buffer()
+
+            prose_buffer.append(page_text)
+            last_element_was_table = False
+
+    flush_prose_buffer()
+
+    for idx, c in enumerate(chunks):
+        c.metadata["chunk_id"] = f"{Path(filename).stem}_p{c.metadata.get('page_number', 1)}_{idx}"
+
+    return chunks
+
+def build_and_save_index(all_chunks: List[Document], category: str) -> Path:
+    if HAS_CUDA:
+        torch.cuda.empty_cache()
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs={"device": "cuda"} if HAS_CUDA else {},
+    )
+    
     vector_store = FAISS.from_documents(all_chunks, embeddings)
 
-    index_dir = Path("vector_indices") / f"{category}_index"
-    index_dir.mkdir(parents=True, exist_ok=True)
+    index_dir = _BUILD_DIR / f"{category}_index"
+    os.makedirs(str(index_dir), exist_ok=True)
     vector_store.save_local(str(index_dir))
 
     faiss_hash = hashlib.sha256()
     faiss_hash.update((index_dir / "index.faiss").read_bytes())
     faiss_hash.update((index_dir / "index.pkl").read_bytes())
     (index_dir / "index.hash").write_text(faiss_hash.hexdigest())
-    logger.info("event=index_saved path=%s", index_dir)
 
-    corpus: list[dict] = [
-        {"text": doc.page_content, "metadata": doc.metadata}
-        for doc in all_chunks
-    ]
-    corpus_path = index_dir / "bm25_corpus.json"
-    corpus_path.write_text(
-        json.dumps(corpus, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    logger.info(
-        "event=bm25_corpus_saved path=%s docs=%d",
-        corpus_path,
-        len(corpus),
-    )
+    if HAS_CUDA:
+        torch.cuda.empty_cache()
+
     return index_dir
 
+def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Callable] = None) -> dict:
+    all_chunks: List[Document] = []
+    
+    state = read_ingest_state(category)
+    completed_files = set(state.get("completed_files", []))
 
-def process_pdf(
-    pdf_path: Path,
-    filename: str,
-    category: str,
-) -> tuple[list[Document], float, bool]:
-    from datetime import datetime, timezone
+    total_pages_overall = 0
+    file_page_counts = {}
+    for p_path_str in pdf_paths:
+        p_path = Path(p_path_str)
+        try:
+            r = pypdf.PdfReader(p_path)
+            cnt = len(r.pages)
+            total_pages_overall += cnt
+            file_page_counts[p_path.name] = cnt
+        except Exception as e:
+            logger.warning(f"Failed to read page count for {p_path.name}: {e}")
+            file_page_counts[p_path.name] = 1 # fallback
+            total_pages_overall += 1
+            
+    if ui_callback:
+        ui_callback("INIT", None, 0, total_pages_overall, dev=file_page_counts)
 
-    import pypdf
-    from docling.datamodel.accelerator_options import AcceleratorDevice
-    from docling.datamodel.base_models import InputFormat
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from local_builder import (
-        build_pipeline_options,
-        _DEVICE,
-        extract_chunks,
-        perform_ocr_fallback,
-    )
+    for idx, pdf_path_str in enumerate(pdf_paths):
+        pdf_path = Path(pdf_path_str)
+        filename = pdf_path.name
+        
+        file_hash = _get_file_hash(pdf_path)
+        
+        cached = _load_chunks_cache(file_hash)
+        if cached is not None:
+            for c in cached:
+                c.metadata["category"] = category
+            all_chunks.extend(cached)
+            completed_files.add(filename)
+            _write_ingest_state(category, {"completed_files": list(completed_files), "total_files": len(pdf_paths)})
+            if ui_callback:
+                ui_callback("FILE_CACHED", filename, idx + 1, len(pdf_paths))
+            continue
+        elif filename in completed_files:
+            completed_files.remove(filename)
 
-    tmp_path = pdf_path
-    t_start = time.monotonic()
-    file_chunks: list[Document] = []
-    success = False
+        if ui_callback:
+            ui_callback("FILE_START", filename, idx + 1, len(pdf_paths))
 
-    # Get total page count to detect dropped pages later
-    total_pages = 0
-    try:
-        reader = pypdf.PdfReader(tmp_path)
-        total_pages = len(reader.pages)
-    except Exception:
-        pass
+        if ui_callback:
+            ui_callback("FILE_SPLITTING", filename, idx + 1, len(pdf_paths))
 
-    try:
-        pipeline_opts = build_pipeline_options(device=_DEVICE)
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_opts)
-            }
-        )
-        result = converter.convert(tmp_path)
-        doc = result.document
-        file_chunks = extract_chunks(doc, filename, category, tmp_path)
-        success = True
+        merged_doc = _MergedDocument()
+        tmp_dir = Path(tempfile.mkdtemp(prefix="docling_pdf_"))
+        
+        try:
+            for page_no, page_tmp_path, total_pages in _split_pdf_pages(pdf_path, tmp_dir):
+                
+                def page_cb(p_no, dev, warn):
+                    if ui_callback:
+                        ui_callback("PAGE_PROG", filename, p_no, total_pages, dev, warn)
+                
+                doc_page = _convert_page(page_tmp_path, page_no, callback=page_cb)
+                page_text = doc_page.export_to_text()
+                
+                if _should_trigger_ocr_fallback(page_text):
+                    if ui_callback:
+                        ui_callback("PAGE_OCR_RETRY", filename, page_no, total_pages, "CPU", "OCR Triggered")
+                    doc_page = _convert_page_force_ocr(page_tmp_path, page_no, callback=page_cb)
+                
+                merged_doc.add_page_doc(doc_page, page_no)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    except RuntimeError as e:
-        oom_keywords = ["out of memory", "alloc", "cuda error"]
-        if any(m in str(e).lower() for m in oom_keywords):
-            logger.warning("event=oom_fallback source=%s error=%s", filename, str(e))
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
+        if ui_callback:
+            ui_callback("FILE_CHUNKING", filename, idx + 1, len(pdf_paths))
 
-            if tmp_path and tmp_path.exists():
-                try:
-                    cpu_options = build_pipeline_options(
-                        device=AcceleratorDevice.CPU,
-                        ocr_batch=1,
-                        layout_batch=1,
-                        table_batch=1,
-                    )
-                    converter = DocumentConverter(
-                        format_options={
-                            InputFormat.PDF: PdfFormatOption(pipeline_options=cpu_options)
-                        }
-                    )
-                    result = converter.convert(tmp_path)
-                    doc = result.document
-                    file_chunks = extract_chunks(doc, filename, category, tmp_path)
-                    success = True
-                except RuntimeError as cpu_e:
-                    logger.error(
-                        "event=cpu_fallback_failed source=%s error=%s",
-                        filename,
-                        str(cpu_e),
-                    )
-        else:
-            logger.error(
-                "event=pdf_failed source=%s error=%s", filename, str(e)
-            )
+        chunks = extract_chunks(merged_doc, filename, category)
+        _save_chunks_cache(file_hash, chunks)
+        all_chunks.extend(chunks)
+        
+        completed_files.add(filename)
+        _write_ingest_state(category, {"completed_files": list(completed_files), "total_files": len(pdf_paths)})
 
-    else:
-        # Page-level recovery: reprocess any pages silently dropped by docling
-        if total_pages > 0:
-            pages_in_chunks: set[int] = set()
-            for chunk in file_chunks:
-                pn = chunk.metadata.get("page_number")
-                if pn is not None:
-                    pages_in_chunks.add(int(pn))
+    if not all_chunks:
+        raise ValueError("No chunks extracted from PDFs")
 
-            missing = sorted(set(range(1, total_pages + 1)) - pages_in_chunks)
-            if missing:
-                logger.warning(
-                    "event=missing_pages source=%s total=%d present=%d missing_count=%d",
-                    filename,
-                    total_pages,
-                    len(pages_in_chunks),
-                    len(missing),
-                )
-                for page_no in missing:
-                    try:
-                        recovered = perform_ocr_fallback(tmp_path, page_no, filename)
-                        if recovered and recovered.strip():
-                            metadata = {
-                                "source": Path(filename).name,
-                                "page_number": page_no,
-                                "category": category,
-                                "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
-                                "is_table": False,
-                                "is_table_continuation": False,
-                                "is_recovered": True,
-                            }
-                            file_chunks.append(
-                                Document(page_content=recovered.strip(), metadata=metadata)
-                            )
-                            logger.info(
-                                "event=page_recovered source=%s page=%d text_len=%d",
-                                filename,
-                                page_no,
-                                len(recovered),
-                            )
-                    except Exception as page_e:
-                        logger.warning(
-                            "event=page_recovery_failed source=%s page=%d error=%s",
-                            filename,
-                            page_no,
-                            str(page_e),
-                        )
+    if ui_callback:
+        ui_callback("BUILDING_INDEX", None, 0, 0)
 
-    finally:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    index_dir = build_and_save_index(all_chunks, category)
 
-    elapsed = time.monotonic() - t_start
-    return file_chunks, elapsed, success
+    corpus_data = [{"text": c.page_content, "metadata": c.metadata} for c in all_chunks]
+    corpus_path = index_dir / "bm25_corpus.json"
+    corpus_path.write_text(json.dumps(corpus_data, ensure_ascii=False), encoding="utf-8")
+
+    clear_cache(category)
+    gc.collect()
+    
+    return {"chunk_count": len(all_chunks), "category": category}
+
