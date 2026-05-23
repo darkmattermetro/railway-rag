@@ -1,5 +1,3 @@
-"""Shared utility functions for the Railway RAG pipeline."""
-
 import json
 import logging
 import re
@@ -15,34 +13,7 @@ RETRIEVAL_K: int = 20
 MAX_CONTEXT_TOKENS: int = 3500
 RESERVE_TOKENS: int = 500
 CHUNK_BUDGET: int = MAX_CONTEXT_TOKENS - RESERVE_TOKENS  # 3000
-
-FAISS_SIM_THRESHOLD: float = 0.35
-FAISS_CONFIDENCE_THRESHOLD: float = 0.60
-GARBAGE_RATIO_THRESHOLD: float = 0.40
-EMBEDDING_RETRY_WAIT_SECS: int = 60
-
-_ENC = tiktoken.get_encoding("cl100k_base")
-
-
-@dataclass
-class Chunk:
-    text: str
-    source_file: str
-    page_number: int
-    chunk_id: str
-    char_start: int
-    char_end: int
-    token_count: int
-
-
-def count_tokens(text: str) -> int:
-    return len(_ENC.encode(text))
-
-
-def log_event(event: str, **kwargs) -> None:
-    record = {"timestamp": __import__("time").time(), "event": event}
-    record.update(kwargs)
-    print(json.dumps(record, ensure_ascii=False), file=sys.stderr)
+TOKEN_BUDGET: int = CHUNK_BUDGET  # Alias for fallback compatibility
 
 FAISS_SIM_THRESHOLD: float = 0.35
 FAISS_CONFIDENCE_THRESHOLD: float = 0.60
@@ -112,6 +83,28 @@ def apply_source_diversity(documents: list[Document], max_per_page: int = 2) -> 
             result.append(doc)
     return result
 
+def parse_citations(text: str) -> tuple[str, list[int]]:
+    """
+    Parses <used_chunks>[0, 2]</used_chunks> from the text.
+    Returns the cleaned text and the list of integer indices.
+    """
+    indices = []
+    
+    # Try looking for exactly <used_chunks>[X, Y]</used_chunks>
+    match = re.search(r'<used_chunks>\s*\[(.*?)\]\s*</used_chunks>', text)
+    if match:
+        content = match.group(1)
+        # Parse the comma-separated strings inside the brackets safely without try-except blocks
+        parts = content.split(',')
+        for p in parts:
+            p = p.strip()
+            if p.isdigit():
+                indices.append(int(p))
+                
+    # Remove the XML tag block from final display
+    clean_text = re.sub(r'<used_chunks>.*?</used_chunks>', '', text, flags=re.DOTALL)
+    
+    return clean_text.strip(), indices
 
 def process_citations(response: str, citation_map: dict) -> tuple[str, list[str]]:
     pattern = re.compile(r'\[(chunk_\d+)\]')

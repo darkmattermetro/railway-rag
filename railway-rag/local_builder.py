@@ -21,21 +21,7 @@ from pathlib import Path
 import torch
 import streamlit as st
 
-from ingest import ingest_pdfs
-
-# WARNING: Verify these APIs against installed docling version.
-# Uncertain: docling_core types may be subject to change in minor versions.
-# Alternative if unavailable: Check for types in docling.datamodel.
-from docling_core.types.doc import (
-    DoclingDocument,
-    SectionHeaderItem,
-    TableItem,
-    TextItem,
-)
-
-# ==============================================================================
-# 1. LOGGING & CONSTANTS
-# ==============================================================================
+from ingest import ingest_pdfs, read_ingest_state, clear_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,7 +94,6 @@ def main() -> None:
             st.error(f"{f.name} exceeds {MAX_FILE_SIZE_BYTES // 1024 // 1024} MB.")
             st.stop()
 
-    # --- Save uploads to temp directory ---
     tmp_dir = Path(tempfile.mkdtemp())
     pdf_paths: list[str] = []
     try:
@@ -117,41 +102,96 @@ def main() -> None:
             tmp_path.write_bytes(uploaded_file.getvalue())
             pdf_paths.append(str(tmp_path.resolve()))
 
-        logger.info(
-            "event=session_start file_count=%d category=%s",
-            len(pdf_paths),
-            safe_category,
-        )
+        import time
+        class ProgressState:
+            def __init__(self):
+                self.start_time = time.time()
+                self.global_pages_done = 0
+                self.global_total_pages = 0
+                self.cached_files = set()
+                self.file_page_counts = {}
 
-        # --- Single ingest call ---
-        file_names = [Path(p).name for p in pdf_paths]
-        with st.status(f"Processing {len(pdf_paths)} files...") as status:
-            for name in file_names:
-                status.write(f"  {name}")
-            result = ingest_pdfs(pdf_paths, safe_category)
+        pstate = ProgressState()
 
-        st.success(f"✅ Index built — {result['chunk_count']} chunks in `{safe_category}_index`")
-        logger.info(
-            "event=session_complete chunk_count=%d category=%s",
-            result["chunk_count"],
-            safe_category,
-        )
+        progress_container = st.container()
+        progress_bar = progress_container.progress(0.0)
+        time_text = progress_container.empty()
+        file_status = progress_container.empty()
+        page_detail = progress_container.empty()
+        
+        def update_progress():
+            if pstate.global_total_pages > 0:
+                prog = min(pstate.global_pages_done / pstate.global_total_pages, 1.0)
+                progress_bar.progress(prog)
+                
+                elapsed = time.time() - pstate.start_time
+                if pstate.global_pages_done > 0:
+                    pages_remaining = pstate.global_total_pages - pstate.global_pages_done
+                    time_per_page = elapsed / pstate.global_pages_done
+                    eta = pages_remaining * time_per_page
+                    
+                    if pages_remaining > 0:
+                        em, es = divmod(int(elapsed), 60)
+                        mins, secs = divmod(int(eta), 60)
+                        time_text.text(f"⏱ Elapsed: {em}m {es}s | Estimated remaining: {mins}m {secs}s")
+                    else:
+                        time_text.text("")
+                else:
+                    em, es = divmod(int(elapsed), 60)
+                    time_text.text(f"⏱ Elapsed: {em}m {es}s | Estimating time remaining...")
+        
+        def ui_callback(event, filename, val1, val2, dev=None, warn=None):
+            if event == "INIT":
+                pstate.global_total_pages = val2
+                pstate.file_page_counts = dev or {}
+                update_progress()
+            elif event == "FILE_CACHED":
+                pstate.cached_files.add(filename)
+                pages_in_file = pstate.file_page_counts.get(filename, 0)
+                pstate.global_pages_done += pages_in_file
+                file_status.info(f"📄 File {val1}/{val2}: `{filename}` (cached)")
+                page_detail.info(f"⏭ Loaded {pages_in_file} pages from cache")
+                update_progress()
+            elif event == "FILE_START":
+                file_status.info(f"📄 File {val1}/{val2}: `{filename}`")
+            elif event == "FILE_SPLITTING":
+                page_detail.info(f"✂️ Splitting PDF into pages...")
+            elif event == "PAGE_PROG":
+                pstate.global_pages_done += 1
+                dev_str = f"[{dev}]" if dev else ""
+                page_detail.text(f"📖 Page {val1}/{val2}: Converting {dev_str}")
+                update_progress()
+            elif event == "PAGE_OCR_RETRY":
+                page_detail.text(f"📖 Page {val1}/{val2}: OCR retry [CPU]")
+            elif event == "FILE_CHUNKING":
+                page_detail.info(f"📦 Extracting chunks...")
+            elif event == "BUILDING_INDEX":
+                progress_bar.progress(1.0)
+                elapsed = time.time() - pstate.start_time
+                em, es = divmod(int(elapsed), 60)
+                time_text.text(f"⏱ Total time: {em}m {es}s")
+                page_detail.success("✅ All files processed. Building FAISS & BM25 index...")
 
-    except ValueError as e:
-        logger.error("event=session_failed error=%s", str(e))
-        st.error(str(e))
-        st.stop()
-    except RuntimeError as e:
-        logger.error("event=session_failed error=%s", str(e))
-        st.error(str(e))
+        result = ingest_pdfs(pdf_paths, safe_category, ui_callback=ui_callback)
+
+        elapsed = time.time() - pstate.start_time
+        em, es = divmod(int(elapsed), 60)
+        st.success(f"✅ Index built — {result['chunk_count']} chunks in `{safe_category}_index` (⏱ {em}m {es}s)")
+        
+    except Exception as e:
+        logger.exception("Ingestion failed")
+        st.error(f"Error during ingestion: {str(e)}")
         st.stop()
     finally:
-        # Clean up temp files
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
 
 if __name__ == "__main__":
