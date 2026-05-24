@@ -33,7 +33,9 @@ class ModelSelector:
         groq_api_keys: List[str],
         query_count: int = 0,
         max_retries_per_model: int = 2,
-        cooldown_seconds: int = 30
+        gemini_cooldown: int = 60,
+        groq_cooldown: int = 65,
+        session_state: Optional[dict] = None,
     ):
         self.gemini_models = gemini_models
         self.groq_models = groq_models
@@ -41,35 +43,49 @@ class ModelSelector:
         self.groq_api_keys = groq_api_keys
         self.query_count = query_count
         self.max_retries_per_model = max_retries_per_model
-        self.cooldown_seconds = cooldown_seconds
+        self.cooldowns = {"gemini": gemini_cooldown, "groq": groq_cooldown}
 
-        # Per-model states
-        self.model_states = {}
-        for model in gemini_models:
-            self.model_states[model] = {
-                'retries': 0,
-                'last_error_time': 0,
-                'is_exhausted': False,
-                'provider': 'gemini'
-            }
-        for model in groq_models:
-            self.model_states[model] = {
-                'retries': 0,
-                'last_error_time': 0,
-                'is_exhausted': False,
-                'provider': 'groq'
-            }
-
-        # Per-provider key states
-        self.key_states = {}
-        for provider, keys in [('gemini', gemini_api_keys), ('groq', groq_api_keys)]:
-            self.key_states[provider] = {
-                'keys': keys,
-                'current_index': 0,
-                'exhausted': [False] * len(keys),
-                'last_error_time': [0] * len(keys),
-                'retries': [0] * len(keys),
-            }
+        if session_state is not None:
+            session_state.setdefault("model_states", {})
+            for model in gemini_models:
+                if model not in session_state["model_states"]:
+                    session_state["model_states"][model] = {
+                        "retries": 0, "last_error_time": 0, "is_exhausted": False, "provider": "gemini"
+                    }
+            for model in groq_models:
+                if model not in session_state["model_states"]:
+                    session_state["model_states"][model] = {
+                        "retries": 0, "last_error_time": 0, "is_exhausted": False, "provider": "groq"
+                    }
+            session_state.setdefault("key_states", {})
+            for provider, keys in [("gemini", gemini_api_keys), ("groq", groq_api_keys)]:
+                if provider not in session_state["key_states"]:
+                    session_state["key_states"][provider] = {
+                        "keys": keys, "current_index": 0,
+                        "exhausted": [False] * len(keys),
+                        "last_error_time": [0] * len(keys),
+                        "retries": [0] * len(keys),
+                    }
+            self.model_states = session_state["model_states"]
+            self.key_states = session_state["key_states"]
+        else:
+            self.model_states = {}
+            for model in gemini_models:
+                self.model_states[model] = {
+                    "retries": 0, "last_error_time": 0, "is_exhausted": False, "provider": "gemini"
+                }
+            for model in groq_models:
+                self.model_states[model] = {
+                    "retries": 0, "last_error_time": 0, "is_exhausted": False, "provider": "groq"
+                }
+            self.key_states = {}
+            for provider, keys in [("gemini", gemini_api_keys), ("groq", groq_api_keys)]:
+                self.key_states[provider] = {
+                    "keys": keys, "current_index": 0,
+                    "exhausted": [False] * len(keys),
+                    "last_error_time": [0] * len(keys),
+                    "retries": [0] * len(keys),
+                }
 
         self.last_provider: Optional[str] = None
 
@@ -78,12 +94,13 @@ class ModelSelector:
     # ------------------------------------------------------------------
 
     def _is_model_available(self, model_name: str) -> bool:
-        """Check if a model is available (not exhausted or in cooldown)"""
+        """"Check if a model is available (not exhausted or in cooldown)"""
         state = self.model_states.get(model_name)
         if not state:
             return False
         if state['is_exhausted']:
-            if time.time() - state['last_error_time'] > self.cooldown_seconds:
+            cooldown = self.cooldowns.get(state['provider'], 60)
+            if time.time() - state['last_error_time'] > cooldown:
                 state['is_exhausted'] = False
                 state['retries'] = 0
                 logger.info(f"Model {model_name} cooldown expired, making available again")
@@ -100,15 +117,21 @@ class ModelSelector:
         return None
 
     def _mark_model_exhausted(self, model_name: str, error: Exception):
-        """Mark a model as exhausted"""
+        """Mark a model as exhausted after retries are exceeded"""
         state = self.model_states.get(model_name)
         if state:
-            state['is_exhausted'] = True
-            state['last_error_time'] = time.time()
             state['retries'] += 1
-            logger.warning(
-                f"event=llm_model_exhausted model={model_name} provider={state['provider']} error={type(error).__name__}"
-            )
+            state['last_error_time'] = time.time()
+            if state['retries'] >= self.max_retries_per_model:
+                state['is_exhausted'] = True
+                logger.warning(
+                    f"event=llm_model_exhausted model={model_name} provider={state['provider']} error={type(error).__name__}"
+                )
+            else:
+                logger.info(
+                    f"event=llm_retry model={model_name} provider={state['provider']} "
+                    f"retry={state['retries']}/{self.max_retries_per_model}"
+                )
 
     # ------------------------------------------------------------------
     # Key state helpers
@@ -120,7 +143,8 @@ class ModelSelector:
         if not state or key_index >= len(state['keys']):
             return False
         if state['exhausted'][key_index]:
-            if time.time() - state['last_error_time'][key_index] > self.cooldown_seconds:
+            cooldown = self.cooldowns.get(provider, 60)
+            if time.time() - state['last_error_time'][key_index] > cooldown:
                 state['exhausted'][key_index] = False
                 state['retries'][key_index] = 0
                 logger.info(f"Key {key_index} for {provider} cooldown expired, available again")
@@ -133,7 +157,7 @@ class ModelSelector:
         state = self.key_states.get(provider)
         if not state or not state['keys']:
             return None, None
-        start = state['current_index']
+        start = self.query_count % len(state['keys'])
         n = len(state['keys'])
         for offset in range(n):
             idx = (start + offset) % n
@@ -219,15 +243,12 @@ class ModelSelector:
         ordered_providers = providers[shift:] + providers[:shift]
 
         for provider in ordered_providers:
-            model_list_len = len(self.gemini_models if provider == 'gemini' else self.groq_models)
-
-            for attempt in range(model_list_len):
+            while True:
                 model_name = self._get_next_available_model(provider)
                 if not model_name:
                     logger.warning(f"event=llm_no_available_models provider={provider}")
                     break
 
-                # Try each key for this model before giving up
                 while True:
                     key_idx, api_key = self._get_active_key(provider)
                     if key_idx is None:
@@ -254,10 +275,10 @@ class ModelSelector:
 
                         if self._is_quota_or_rate_error(e):
                             self._mark_key_exhausted(provider, key_idx)
-                            continue  # try next key with same model
+                            continue
                         else:
                             self._mark_model_exhausted(model_name, e)
-                            break  # non-quota error, try next model
+                            break
 
         logger.error("event=llm_all_models_exhausted")
         if last_error:
@@ -280,9 +301,7 @@ class ModelSelector:
         ordered_providers = providers[shift:] + providers[:shift]
 
         for provider in ordered_providers:
-            model_list_len = len(self.gemini_models if provider == 'gemini' else self.groq_models)
-
-            for attempt in range(model_list_len):
+            while True:
                 model_name = self._get_next_available_model(provider)
                 if not model_name:
                     logger.warning(f"event=llm_no_available_models provider={provider}")
