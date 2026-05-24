@@ -38,10 +38,10 @@ _CACHE_DIR = _BUILD_DIR / ".chunks_cache"
 
 # Constants
 EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"
-CHUNK_SIZE_TOKENS: int = 512
-CHUNK_OVERLAP_TOKENS: int = 200
-CHUNK_SIZE_CHARS: int = 2000
-CHUNK_OVERLAP_CHARS: int = 300
+CHUNK_SIZE_TOKENS: int = 384
+CHUNK_OVERLAP_TOKENS: int = 64
+CHUNK_SIZE_CHARS: int = 1500
+CHUNK_OVERLAP_CHARS: int = 128
 
 OCR_MIN_TEXT_LEN: int = 20
 OCR_GARBAGE_RATIO_THRESHOLD: float = 0.4
@@ -69,6 +69,9 @@ def _save_chunks_cache(file_hash: str, chunks: List[Document]):
     cache_path = _CACHE_DIR / f"{file_hash}.json"
     data = [{"page_content": c.page_content, "metadata": c.metadata} for c in chunks]
     cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    page_dir = _CACHE_DIR / f"{file_hash}.pages"
+    if page_dir.is_dir():
+        shutil.rmtree(page_dir, ignore_errors=True)
 
 def _load_chunks_cache(file_hash: str) -> Optional[List[Document]]:
     cache_path = _CACHE_DIR / f"{file_hash}.json"
@@ -77,8 +80,26 @@ def _load_chunks_cache(file_hash: str) -> Optional[List[Document]]:
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
         return [Document(page_content=d["page_content"], metadata=d["metadata"]) for d in data]
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError) as e:
         logger.warning(f"Failed to load cache from {cache_path}: {e}")
+        return None
+
+def _save_page_chunks(file_hash: str, page_no: int, chunks: List[Document]):
+    page_dir = _CACHE_DIR / f"{file_hash}.pages"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    path = page_dir / f"page_{page_no:04d}.json"
+    data = [{"page_content": c.page_content, "metadata": c.metadata} for c in chunks]
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+def _load_page_chunks(file_hash: str, page_no: int) -> Optional[List[Document]]:
+    path = _CACHE_DIR / f"{file_hash}.pages" / f"page_{page_no:04d}.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [Document(page_content=d["page_content"], metadata=d["metadata"]) for d in data]
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Failed to load page cache {path.name}: {e}")
         return None
 
 def read_ingest_state(category: str) -> dict:
@@ -392,10 +413,9 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
             cnt = len(r.pages)
             total_pages_overall += cnt
             file_page_counts[p_path.name] = cnt
-        except Exception as e:
-            logger.warning(f"Failed to read page count for {p_path.name}: {e}")
-            file_page_counts[p_path.name] = 1 # fallback
-            total_pages_overall += 1
+        except (pypdf.errors.PdfReadError, OSError) as e:
+            logger.warning(f"Skipping unreadable file {p_path.name}: {e}")
+            continue
             
     if ui_callback:
         ui_callback("INIT", None, 0, total_pages_overall, dev=file_page_counts)
@@ -403,7 +423,16 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
     for idx, pdf_path_str in enumerate(pdf_paths):
         pdf_path = Path(pdf_path_str)
         filename = pdf_path.name
-        
+
+        try:
+            r_check = pypdf.PdfReader(pdf_path)
+            _ = len(r_check.pages)
+        except pypdf.errors.PdfReadError:
+            logger.error(f"Corrupt PDF, skipping: {filename}")
+            if ui_callback:
+                ui_callback("FILE_SKIP", filename, idx + 1, len(pdf_paths))
+            continue
+
         file_hash = _get_file_hash(pdf_path)
         
         cached = _load_chunks_cache(file_hash)
@@ -425,34 +454,47 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
         if ui_callback:
             ui_callback("FILE_SPLITTING", filename, idx + 1, len(pdf_paths))
 
-        merged_doc = _MergedDocument()
         tmp_dir = Path(tempfile.mkdtemp(prefix="docling_pdf_"))
-        
+        restored_pages = 0
+
         try:
             for page_no, page_tmp_path, total_pages in _split_pdf_pages(pdf_path, tmp_dir):
-                
+
                 def page_cb(p_no, dev, warn):
                     if ui_callback:
                         ui_callback("PAGE_PROG", filename, p_no, total_pages, dev, warn)
-                
+
+                cached_chunks = _load_page_chunks(file_hash, page_no)
+                if cached_chunks is not None:
+                    all_chunks.extend(cached_chunks)
+                    restored_pages += 1
+                    if ui_callback:
+                        ui_callback("PAGE_PROG", filename, page_no, total_pages, "checkpoint", "Restored")
+                    continue
+
                 doc_page = _convert_page(page_tmp_path, page_no, callback=page_cb)
                 page_text = doc_page.export_to_text()
-                
+
                 if _should_trigger_ocr_fallback(page_text):
                     if ui_callback:
                         ui_callback("PAGE_OCR_RETRY", filename, page_no, total_pages, "CPU", "OCR Triggered")
                     doc_page = _convert_page_force_ocr(page_tmp_path, page_no, callback=page_cb)
-                
-                merged_doc.add_page_doc(doc_page, page_no)
+
+                page_merged = _MergedDocument()
+                page_merged.add_page_doc(doc_page, page_no)
+                page_chunks = extract_chunks(page_merged, filename, category)
+                _save_page_chunks(file_hash, page_no, page_chunks)
+                all_chunks.extend(page_chunks)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        if restored_pages:
+            logger.info("Restored %d pages from checkpoint for %s", restored_pages, filename)
 
         if ui_callback:
             ui_callback("FILE_CHUNKING", filename, idx + 1, len(pdf_paths))
 
-        chunks = extract_chunks(merged_doc, filename, category)
-        _save_chunks_cache(file_hash, chunks)
-        all_chunks.extend(chunks)
+        _save_chunks_cache(file_hash, all_chunks)
         
         completed_files.add(filename)
         _write_ingest_state(category, {"completed_files": list(completed_files), "total_files": len(pdf_paths)})
