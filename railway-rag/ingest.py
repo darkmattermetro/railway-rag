@@ -900,7 +900,11 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
         if ui_callback:
             ui_callback("FILE_CHUNKING", filename, idx + 1, len(pdf_paths))
 
-        _save_chunks_cache(category, file_hash, jsonl_path)
+        if jsonl_path.exists():
+            _save_chunks_cache(category, file_hash, jsonl_path)
+        else:
+            logger.warning("event=no_chunks_saved file=%s — no pages were processed, skipping", filename)
+            continue
 
         completed_files.add(file_hash)
         _write_ingest_state(category, {"completed_files": list(completed_files), "total_files": len(pdf_paths)})
