@@ -17,6 +17,7 @@ vector_indices/*
 !vector_indices/MRGR_index/
 !vector_indices/SPECIAL_INSTRUCTIONS_index/
 !vector_indices/Safety_Circular_index/
+!vector_indices/RS10_index/
 
 # CodeGraph AI cache
 .codegraph/
