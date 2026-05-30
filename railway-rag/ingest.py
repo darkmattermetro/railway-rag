@@ -504,9 +504,65 @@ def _count_jsonl_lines(path: Path) -> int:
     return count
 
 
+def _check_incremental_possible(index_dir: Path) -> tuple[bool, str | None]:
+    """Check whether an existing index can be incrementally updated."""
+    if not index_dir.exists():
+        return False, "no_index_dir"
+    meta_file = index_dir / "build_meta.json"
+    if not meta_file.exists():
+        return False, "no_build_meta"
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception:
+        return False, "corrupt_build_meta"
+    if meta.get("cache_version") != CACHE_VERSION:
+        return False, "cache_version_mismatch"
+    if meta.get("embedding_model") != EMBEDDING_MODEL:
+        return False, "embedding_model_changed"
+    return True, None
+
+
+def _load_existing_chunk_ids(corpus_path: Path) -> set[str] | None:
+    """Load existing BM25 corpus and return set of chunk_ids.
+    Returns None if the corpus is missing, corrupt, or some entries lack chunk_id."""
+    try:
+        with open(corpus_path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except Exception as exc:
+        logger.warning("event=incremental_skip corpus_load_failed error=%s", exc)
+        return None
+    ids = {e["metadata"]["chunk_id"] for e in entries if "chunk_id" in e.get("metadata", {})}
+    if len(ids) < len(entries):
+        logger.warning(
+            "event=incremental_skip chunk_id_missing_in_corpus missing=%d total=%d",
+            len(entries) - len(ids), len(entries),
+        )
+        return None
+    return ids
+
+
+def _update_index_hash(index_dir: Path):
+    """Recompute index.hash from current index.faiss + index.pkl."""
+    faiss_file = index_dir / "index.faiss"
+    pkl_file = index_dir / "index.pkl"
+    if not faiss_file.exists() or not pkl_file.exists():
+        return
+    h = hashlib.sha256()
+    h.update(faiss_file.read_bytes())
+    h.update(pkl_file.read_bytes())
+    (index_dir / "index.hash").write_text(h.hexdigest())
+
+
+def _write_build_meta(index_dir: Path):
+    """Persist cache_version + embedding_model for future incremental checks."""
+    meta = {"cache_version": CACHE_VERSION, "embedding_model": EMBEDDING_MODEL}
+    (index_dir / "build_meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
 def build_and_save_index(deduped_jsonl: Path, category: str, ui_callback: Optional[Callable] = None) -> tuple[Path, int]:
     """Build FAISS index by streaming chunks from a deduped JSONL file.
-    Never loads more than one batch into RAM."""
+    Never loads more than one batch into RAM.
+    Supports incremental update when an existing index is present."""
     batch_size = FAISS_BATCH_SIZE
 
     if HAS_CUDA:
@@ -517,6 +573,122 @@ def build_and_save_index(deduped_jsonl: Path, category: str, ui_callback: Option
             logger.warning("Low VRAM (%.1f GB), reduced batch to %d", free_vram_gb, batch_size)
         torch.cuda.empty_cache()
 
+    index_dir = _BUILD_DIR / f"{category}_index"
+    corpus_path = index_dir / "bm25_corpus.json"
+
+    # --- Attempt incremental update ---
+    if corpus_path.exists():
+        inc_possible, reason = _check_incremental_possible(index_dir)
+        if not inc_possible:
+            logger.info("event=incremental_skip reason=%s", reason)
+        else:
+            existing_ids = _load_existing_chunk_ids(corpus_path)
+            if existing_ids is not None:
+                logger.info("event=incremental_update_mode")
+                # Collect only genuinely new chunks
+                new_chunks = []
+                for chunk_dict in _iter_jsonl(deduped_jsonl):
+                    cid = chunk_dict.get("metadata", {}).get("chunk_id")
+                    if cid and cid in existing_ids:
+                        continue
+                    new_chunks.append(chunk_dict)
+
+                if not new_chunks:
+                    logger.info("event=index_already_up_to_date chunks=%d", len(existing_ids))
+                    return index_dir, len(existing_ids)
+
+                total_new = len(new_chunks)
+                logger.info("event=incremental_update new_chunks=%d existing_chunks=%d",
+                            total_new, len(existing_ids))
+
+                try:
+                    embeddings = HuggingFaceEmbeddings(
+                        model_name=EMBEDDING_MODEL,
+                        model_kwargs={"device": "cuda"} if HAS_CUDA else {},
+                        encode_kwargs={"normalize_embeddings": True},
+                    )
+                except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                    logger.warning("event=embedding_init_oom fallback=cpu error=%s", e)
+                    batch_size = max(batch_size // 2, 50)
+                    embeddings = HuggingFaceEmbeddings(
+                        model_name=EMBEDDING_MODEL,
+                        model_kwargs={"device": "cpu"},
+                        encode_kwargs={"normalize_embeddings": True},
+                    )
+
+                try:
+                    vector_store = FAISS.load_local(
+                        str(index_dir), embeddings, allow_dangerous_deserialization=True,
+                    )
+                except Exception as e:
+                    logger.warning("event=incremental_fallback_load_failed error=%s", e)
+                else:
+                    try:
+                        with open(corpus_path, "r", encoding="utf-8") as f:
+                            existing_corpus = json.load(f)
+                    except Exception:
+                        existing_corpus = []
+
+                    batch: list[Document] = []
+                    processed = 0
+                    new_corpus_entries: list[dict] = []
+
+                    for chunk_dict in new_chunks:
+                        doc = Document(page_content=chunk_dict["page_content"], metadata=chunk_dict["metadata"])
+                        batch.append(doc)
+                        new_corpus_entries.append({
+                            "text": chunk_dict["page_content"],
+                            "metadata": chunk_dict["metadata"],
+                        })
+                        if len(batch) >= batch_size:
+                            try:
+                                vector_store.add_documents(batch)
+                            except (RuntimeError, torch.cuda.OutOfMemoryError):
+                                logger.warning("event=incremental_oom batch_size=%d fallback=cpu", len(batch))
+                                cpu_emb = HuggingFaceEmbeddings(
+                                    model_name=EMBEDDING_MODEL,
+                                    model_kwargs={"device": "cpu"},
+                                    encode_kwargs={"normalize_embeddings": True},
+                                )
+                                cpu_idx = FAISS.from_documents(batch, cpu_emb)
+                                vector_store.merge_from(cpu_idx)
+                            processed += len(batch)
+                            if ui_callback:
+                                ui_callback("INDEX_PROGRESS", None, processed, total_new)
+                            batch = []
+
+                    if batch:
+                        try:
+                            vector_store.add_documents(batch)
+                        except (RuntimeError, torch.cuda.OutOfMemoryError):
+                            logger.warning("event=incremental_oom batch_size=%d fallback=cpu", len(batch))
+                            cpu_emb = HuggingFaceEmbeddings(
+                                model_name=EMBEDDING_MODEL,
+                                model_kwargs={"device": "cpu"},
+                                encode_kwargs={"normalize_embeddings": True},
+                            )
+                            cpu_idx = FAISS.from_documents(batch, cpu_emb)
+                            vector_store.merge_from(cpu_idx)
+                        processed += len(batch)
+                        if ui_callback:
+                            ui_callback("INDEX_PROGRESS", None, processed, total_new)
+
+                    os.makedirs(str(index_dir), exist_ok=True)
+                    vector_store.save_local(str(index_dir))
+
+                    existing_corpus.extend(new_corpus_entries)
+                    with open(corpus_path, "w", encoding="utf-8") as f:
+                        json.dump(existing_corpus, f, ensure_ascii=False)
+
+                    _update_index_hash(index_dir)
+                    _write_build_meta(index_dir)
+
+                    if HAS_CUDA:
+                        torch.cuda.empty_cache()
+
+                    return index_dir, len(existing_corpus)
+
+    # --- Full rebuild (fallback) ---
     total = _count_jsonl_lines(deduped_jsonl)
     if total == 0:
         raise ValueError("No chunks to index — deduped corpus is empty")
@@ -575,16 +747,15 @@ def build_and_save_index(deduped_jsonl: Path, category: str, ui_callback: Option
         if ui_callback:
             ui_callback("INDEX_PROGRESS", None, processed, total)
 
-    index_dir = _BUILD_DIR / f"{category}_index"
     os.makedirs(str(index_dir), exist_ok=True)
     vector_store.save_local(str(index_dir))
 
     (index_dir / "embedding_model.txt").write_text(EMBEDDING_MODEL, encoding="utf-8")
 
-    faiss_hash = hashlib.sha256()
-    faiss_hash.update((index_dir / "index.faiss").read_bytes())
-    faiss_hash.update((index_dir / "index.pkl").read_bytes())
-    (index_dir / "index.hash").write_text(faiss_hash.hexdigest())
+    _build_bm25_corpus(deduped_jsonl, corpus_path)
+
+    _write_build_meta(index_dir)
+    _update_index_hash(index_dir)
 
     if HAS_CUDA:
         torch.cuda.empty_cache()
@@ -752,9 +923,6 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
         ui_callback("BUILDING_INDEX", None, 0, 0)
 
     index_dir, chunk_count = build_and_save_index(deduped_path, category, ui_callback=ui_callback)
-
-    corpus_path = index_dir / "bm25_corpus.json"
-    _build_bm25_corpus(deduped_path, corpus_path)
 
     shutil.rmtree(session_dir, ignore_errors=True)
     gc.collect()
