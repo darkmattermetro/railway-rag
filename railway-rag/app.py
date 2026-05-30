@@ -322,18 +322,18 @@ def main() -> None:
     .stAlert { border-left: 3px solid #003366; background: #F0F4F8; border-radius: 4px; }
 
     div.stMarkdown blockquote {
-        background-color: #FFF3CD;
-        border-left: 4px solid #FFC107;
-        padding: 0.75rem 1rem;
-        margin: 0.75rem 0;
-        border-radius: 4px;
-        color: #856404;
-        font-size: 0.95rem;
-        line-height: 1.5;
+        background-color: #FFF3CD !important;
+        border-left: 4px solid #FFC107 !important;
+        padding: 0.75rem 1rem !important;
+        margin: 0.75rem 0 !important;
+        border-radius: 4px !important;
+        color: #856404 !important;
+        font-size: 0.95rem !important;
+        line-height: 1.5 !important;
     }
     div.stMarkdown blockquote strong {
-        color: #664D03;
-        margin-right: 0.25rem;
+        color: #664D03 !important;
+        margin-right: 0.25rem !important;
     }
 </style>
 """, unsafe_allow_html=True)
