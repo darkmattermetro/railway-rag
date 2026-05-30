@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 
 from ingest import EMBEDDING_MODEL
@@ -31,10 +32,8 @@ def load_index(index_dir: Path) -> FAISS:
     if hash_path.exists():
         expected = hash_path.read_text().strip()
         actual = hashlib.sha256()
-        for fname in ("index.faiss", "index.pkl"):
-            with open(index_dir / fname, "rb") as f:
-                while chunk := f.read(65536):
-                    actual.update(chunk)
+        actual.update((index_dir / "index.faiss").read_bytes())
+        actual.update((index_dir / "index.pkl").read_bytes())
         if actual.hexdigest() != expected:
             raise RuntimeError(f"FAISS index integrity mismatch at {index_dir}")
 
@@ -58,6 +57,21 @@ def load_index(index_dir: Path) -> FAISS:
     except RuntimeError as e:
         logger.error("Failed to load FAISS index: %s", e)
         raise RuntimeError(f"Could not load FAISS index: {e}") from e
+
+
+def load_bm25_corpus(index_dir: Path) -> list[Document]:
+    """
+    Load BM25 corpus from JSON file (bm25_corpus.json in index_dir).
+    Corpus is stored as list of dicts: [{"text": "...", "metadata": {...}}, ...]
+    """
+    corpus_path = index_dir / "bm25_corpus.json"
+    corpus_data: list[dict] = json.loads(corpus_path.read_text(encoding="utf-8"))
+    documents = [
+        Document(page_content=item["text"], metadata=item["metadata"])
+        for item in corpus_data
+    ]
+    logger.info("Loaded %d documents from BM25 corpus", len(documents))
+    return documents
 
 
 def run_smoke_test(

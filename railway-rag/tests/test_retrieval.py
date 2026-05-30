@@ -4,12 +4,15 @@ Retrieval unit tests for utils.py functions plus mock-based RRF, threshold, and 
 from unittest.mock import Mock
 
 from utils import (
-    apply_source_diversity,
     deduplicate_chunks,
+    apply_source_diversity,
+    parse_citations,
     extract_technical_identifiers,
-    process_citations,
+    rrf_merge,
     CHUNK_BUDGET,
     FAISS_SIM_THRESHOLD,
+    RETRIEVAL_K,
+    TOKEN_BUDGET,
 )
 
 
@@ -159,46 +162,6 @@ def test_identifier_extraction_empty_on_plain_text():
     technical_codes = extract_technical_identifiers(text)
     assert "What" not in technical_codes
     assert len(technical_codes) == 0
-
-
-# ---------------------------------------------------------------------------
-# Citation processing (process_citations)
-# ---------------------------------------------------------------------------
-
-def test_citation_process_replaces_chunk_ids():
-    citation_map = {
-        "chunk_0": {"file": "doc.pdf", "page": "3"},
-        "chunk_2": {"file": "doc.pdf", "page": "5"},
-    }
-    response = "The signal height is 2.5m [chunk_0] and clearance is 1m [chunk_2]."
-    processed, ordered = process_citations(response, citation_map)
-    assert "[Refer 1]" in processed
-    assert "[Refer 2]" in processed
-    assert ordered == ["chunk_0", "chunk_2"]
-
-
-def test_citation_process_unknown_id_logged():
-    citation_map = {"chunk_0": {"file": "doc.pdf", "page": "3"}}
-    response = "Height is 2.5m [chunk_0] but speed is [chunk_99]."
-    processed, ordered = process_citations(response, citation_map)
-    assert "[Refer 1]" in processed
-    assert ordered == ["chunk_0"]
-
-
-def test_citation_process_no_citations():
-    response = "This answer has no citations."
-    processed, ordered = process_citations(response, {})
-    assert processed == response
-    assert ordered == []
-
-
-def test_citation_process_strips_tag():
-    citation_map = {
-        "chunk_1": {"file": "doc.pdf", "page": "1"},
-    }
-    response = "This is the answer. [chunk_1]"
-    processed, _ = process_citations(response, citation_map)
-    assert "[Refer 1]" in processed
 
 
 # ---------------------------------------------------------------------------

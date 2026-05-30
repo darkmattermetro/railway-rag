@@ -20,10 +20,17 @@ from pathlib import Path
 
 import torch
 import streamlit as st
-from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_script_run_ctx
 
-from config import CATEGORY_MAX_LEN, MAX_FILE_SIZE_BYTES
-from ingest import ingest_pdfs, clear_cache, read_ingest_state
+from ingest import ingest_pdfs, read_ingest_state, clear_cache
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+MAX_FILE_SIZE_BYTES: int = 200 * 1024 * 1024
+CATEGORY_MAX_LEN: int = 64
 
 def main() -> None:
     st.set_page_config(
@@ -58,28 +65,13 @@ def main() -> None:
         accept_multiple_files=True,
     )
 
-    # Resume Logic — cross-reference uploaded files with completed state
-    import hashlib
+    # Resume Logic
     state = read_ingest_state(safe_category)
-    has_incomplete_session = False
-    if state and uploaded_files and len(state.get("completed_files", [])) > 0:
-        uploaded_hashes = {hashlib.sha256(f.getvalue()).hexdigest() for f in uploaded_files}
-        completed = set(state["completed_files"])
-        has_incomplete_session = bool(uploaded_hashes & completed)
+    has_incomplete_session = state and len(state.get("completed_files", [])) > 0
 
     if has_incomplete_session:
-        completed_count = len(state["completed_files"])
-        total_files = state.get("total_files", 0)
-        index_dir = Path("vector_indices") / f"{safe_category}_index"
-        all_done = completed_count >= total_files > 0
-        build_failed = all_done and not index_dir.is_dir()
-        if build_failed:
-            st.sidebar.warning(
-                f"⚠ All {completed_count} files chunked, but the index build failed. "
-                "Resume to retry the indexing step."
-            )
-        else:
-            st.sidebar.warning(f"⚠ Incomplete session detected ({completed_count} files completed).")
+        completed = len(state["completed_files"])
+        st.sidebar.warning(f"⚠ Incomplete session detected ({completed} files completed).")
         
         if st.sidebar.button("Start Fresh"):
             clear_cache(safe_category, delete_chunks=True)
@@ -106,8 +98,7 @@ def main() -> None:
     pdf_paths: list[str] = []
     try:
         for uploaded_file in uploaded_files:
-            safe_name = Path(uploaded_file.name).name  # strips directory components
-            tmp_path = tmp_dir / safe_name
+            tmp_path = tmp_dir / uploaded_file.name
             tmp_path.write_bytes(uploaded_file.getvalue())
             pdf_paths.append(str(tmp_path.resolve()))
 
@@ -130,7 +121,7 @@ def main() -> None:
         
         def update_progress():
             if pstate.global_total_pages > 0:
-                prog = 0.8 * min(pstate.global_pages_done / pstate.global_total_pages, 1.0)
+                prog = min(pstate.global_pages_done / pstate.global_total_pages, 1.0)
                 progress_bar.progress(prog)
                 
                 elapsed = time.time() - pstate.start_time
@@ -165,31 +156,24 @@ def main() -> None:
                 file_status.info(f"📄 File {val1}/{val2}: `{filename}`")
             elif event == "FILE_SPLITTING":
                 page_detail.info(f"✂️ Splitting PDF into pages...")
-            elif event == "PAGE_SKIP":
-                pstate.global_total_pages -= 1
-                page_detail.warning(f"⏭ Page {val1}/{val2}: OOM — skipped")
-            elif event == "FILE_SKIP":
-                file_status.warning(f"📄 File {val1}/{val2}: `{filename}` — skipped (unreadable)")
             elif event == "PAGE_PROG":
+                pstate.global_pages_done += 1
                 dev_str = f"[{dev}]" if dev else ""
                 page_detail.text(f"📖 Page {val1}/{val2}: Converting {dev_str}")
-            elif event == "PAGE_DONE":
-                pstate.global_pages_done += 1
                 update_progress()
             elif event == "PAGE_OCR_RETRY":
                 page_detail.text(f"📖 Page {val1}/{val2}: OCR retry [CPU]")
             elif event == "FILE_CHUNKING":
                 page_detail.info(f"📦 Extracting chunks...")
-            elif event == "DEDUP":
-                page_detail.info("🗑 Deduplicating chunks...")
             elif event == "BUILDING_INDEX":
+                progress_bar.progress(0.0)
                 elapsed = time.time() - pstate.start_time
                 em, es = divmod(int(elapsed), 60)
                 time_text.text(f"⏱ Elapsed: {em}m {es}s | Building index...")
                 page_detail.info("🔨 Building FAISS & BM25 index...")
             elif event == "INDEX_PROGRESS":
-                frac = val1 / val2 if val2 > 0 else 0.0
-                progress_bar.progress(0.8 + 0.2 * frac)
+                prog = val1 / val2 if val2 > 0 else 0.0
+                progress_bar.progress(prog)
                 page_detail.info(f"🔨 Indexing: {val1}/{val2} chunks...")
 
         result = ingest_pdfs(pdf_paths, safe_category, ui_callback=ui_callback)

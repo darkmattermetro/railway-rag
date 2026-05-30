@@ -1,0 +1,890 @@
+================================================================================
+  RAILWAY RAG — COMPLETE BUG LIST & FIXES  (32 bugs)
+  Environment: GTX 1650 (4 GB VRAM), 8 GB RAM local / 1 GB RAM Streamlit Cloud
+  Last updated: 2026-05-26
+================================================================================
+
+Priority key:
+  P0 = Crash, data loss, or injection
+  P1 = Wrong results or broken UX
+  P2 = Reliability / debugging / security
+  P3 = Maintenance / tooling
+
+
+P0 — CRASH / DATA LOSS / INJECTION
+================================================================================
+
+
+1. clear_cache(delete_chunks=True) wipes ALL categories' caches
+────────────────────────────────────────────────────────────────────────
+
+  Files:    ingest.py:135-140, local_builder.py:77, build_index.py:119
+
+  Before:
+    def clear_cache(category, delete_chunks=False):
+        if delete_chunks and _CACHE_DIR.exists():
+            shutil.rmtree(_CACHE_DIR, ignore_errors=True)
+
+    shutil.rmtree(_CACHE_DIR) removes .chunks_cache/ — a shared directory
+    containing cached chunks for ALL categories.  Clicking "Start Fresh" on
+    one category silently destroys cached data for every other category.
+    Hours of docling conversion work lost in one click.
+
+  After:
+    Cache key format changes from {file_hash} to {category}__{file_hash}.
+    clear_cache deletes only files matching its own category prefix.
+
+    if delete_chunks and _CACHE_DIR.exists():
+        prefix = f"{category}__"
+        for p in _CACHE_DIR.iterdir():
+            if p.name.startswith(prefix):
+                (shutil.rmtree if p.is_dir() else p.unlink)(p)
+
+  Change:  ~15 lines in ingest.py — _cache_key() helper, update 4 cache
+           functions, update clear_cache.
+
+
+2. No GPU→CPU fallback during embedding / FAISS build (4 GB VRAM)
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:486-490
+
+  Before:
+    embeddings = HuggingFaceEmbeddings(
+        model_kwargs={"device": "cuda"} if HAS_CUDA else {},
+    )
+    vector_store = FAISS.from_documents(batch, embeddings)
+
+    After 45 minutes of processing on 4 GB VRAM, a moment of VRAM
+    fragmentation causes torch.cuda.OutOfMemoryError.  Zero fallback,
+    zero retry, zero batch-size reduction.  Entire build lost.
+
+  After:
+    try/except wrapping both embedding init AND each embedding batch.
+    On CUDA OOM: halve batch size, fall back to CPU embeddings.
+
+    try:
+        embeddings = HuggingFaceEmbeddings(
+            model_name=..., model_kwargs={"device": "cuda"}, ...)
+    except (RuntimeError, torch.cuda.OutOfMemoryError):
+        logger.warning("CUDA OOM during embedding init, falling back to CPU")
+        batch_size = max(batch_size // 2, 50)
+        embeddings = HuggingFaceEmbeddings(
+            model_name=..., model_kwargs={"device": "cpu"}, ...)
+
+    Same protection around vector_store.from_documents / add_documents.
+
+  Change:  ~20 lines in ingest.py.
+
+
+3. Reranker model OOM on Streamlit Cloud (1 GB RAM)
+────────────────────────────────────────────────────────
+
+  File:     app.py:47
+
+  Before:
+    RERANKER_MODEL: str = "BAAI/bge-reranker-base"   # ~1.1 GB
+
+    Loading a 1.1 GB model alongside ~100 MB embedding model + ~200 MB
+    FAISS index on a 1 GB RAM box is a guaranteed OOM kill.  The app
+    crashes silently (process killed by OS) with no error message.
+
+  After:
+    Use BAAI/bge-reranker-v2-m3 (~200 MB) OR wrap in try/except that
+    gracefully disables reranking on load failure.
+
+    @st.cache_resource
+    def load_reranker():
+        if not RERANKER_ENABLED:
+            return None
+        try:
+            return CrossEncoder("BAAI/bge-reranker-v2-m3", device="cpu")
+        except Exception:
+            logger.warning("Reranker failed to load, disabling")
+            return None
+
+  Change:  One model name string + try/except wrapper in app.py.
+
+
+4. _save_chunks_cache loads entire JSONL into RAM
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:78
+
+  Before:
+    def _save_chunks_cache(file_hash, jsonl_path):
+        chunks = list(_iter_jsonl(jsonl_path))   # ALL chunks in RAM
+        data = {"version": CACHE_VERSION, "chunks": chunks}
+        cache_path.write_text(json.dumps(data, ...))
+
+    A 1000-page document with 5000 chunks (~10 MB JSONL) becomes ~50 MB
+    of Python objects.  Spikes memory on every file.  Defeats the
+    streaming pipeline guarantee.
+
+  After:
+    Stream-copy JSONL line-by-line into a JSON array wrapper.  Never
+    more than one line in RAM.
+
+    with open(cache_path, "w") as out:
+        out.write('{"version": ' + str(CACHE_VERSION) + ', "chunks": [')
+        first = True
+        with open(jsonl_path) as f:
+            for line in f:
+                if not first:
+                    out.write(",")
+                out.write(line.strip())
+                first = False
+        out.write("]}")
+
+  Change:  ~15 lines in ingest.py — rewrite _save_chunks_cache body.
+
+
+5. User AND assistant messages rendered with unsafe_allow_html=True
+────────────────────────────────────────────────────────────────────────
+
+  File:     app.py:330-332
+
+  Before:
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"], unsafe_allow_html=True)
+
+    BOTH user messages (untrusted input) AND assistant messages (model
+    output) are re-rendered as raw HTML on every page rerun.  A crafted
+    user prompt stored in chat history can inject <script>, <iframe>,
+    or CSS cloaking on every subsequent interaction.
+
+    This is HIGHER RISK than the live-response rendering (Bug 9)
+    because user messages are attacker-controlled input, and they
+    persist in session state across reruns.
+
+  After:
+    Remove unsafe_allow_html=True.  Process <inferred> tags with
+    controlled re.sub() before passing to st.markdown().
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            display = re.sub(
+                r'<inferred>(.*?)</inferred>',
+                r'<div class="ai-inferred"><strong>AI Gen:</strong>\1</div>',
+                message["content"],
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            st.markdown(display)   # no unsafe_allow_html
+
+  Change:  ~8 lines in app.py — remove unsafe_allow_html, add
+           controlled <inferred> formatting for history too.
+
+
+P1 — WRONG RESULTS / BROKEN UX
+================================================================================
+
+
+6. Two-level cache invalidation mismatch
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:75-117
+
+  Before:
+    _save_chunks_cache stores  {"version": CACHE_VERSION, ...}
+    _load_chunks_cache checks   data.get("version") == CACHE_VERSION   ✓
+
+    _save_page_chunks stores   [chunk, chunk, ...]    (bare list, no version)
+    _load_page_chunks checks   nothing                (always returns data)  ✗
+
+    Bumping CACHE_VERSION from 2->3: file cache correctly invalidated,
+    but old-format page checkpoints are silently loaded and written
+    into the new JSONL -> contaminated index with stale schema/data.
+
+  After:
+    _save_page_chunks:
+        data = {"version": CACHE_VERSION, "chunks": [...]}
+
+    _load_page_chunks:
+        data = json.loads(...)
+        if isinstance(data, list):
+            return None           # legacy format -> discard
+        if data.get("version") != CACHE_VERSION:
+            return None           # version mismatch -> discard
+        return [Document(...) for d in data["chunks"]]
+
+  Change:  ~10 lines in ingest.py — two functions.
+
+
+7. Resume state collision by filename (ingest.py AND build_index.py)
+────────────────────────────────────────────────────────────────────────
+
+  Files:    ingest.py:577,665 and build_index.py:112
+
+  Before:
+    completed_files.add(filename)          # filename = pdf_path.name
+    _write_ingest_state(category, {"completed_files": ["manual.pdf"]})
+
+    "safety_circ/manual.pdf" and "signals/manual.pdf" share the same
+    basename.  State only tracks one copy.  On resume, the second file
+    triggers spurious re-processing (wasted time) or gets silently
+    skipped (missing data in index).
+
+  After:
+    Track by file_hash (already computed at line 588) instead of
+    basename.  File-level cache already uses hash — make state
+    consistent with cache.
+
+    completed_files.add(file_hash)
+    _write_ingest_state(..., {"completed_files": list(completed_files)})
+
+  Change:  ~5 lines in ingest.py.
+
+
+8. Resume check doesn't cross-reference uploaded files (local_builder.py)
+────────────────────────────────────────────────────────────────────────
+
+  File:     local_builder.py:69-82
+
+  Before:
+    has_incomplete_session = state and len(state.get("completed_files", [])) > 0
+
+    This runs BEFORE the file uploader is evaluated.  Entering a
+    previously-used category name (e.g. "Safety_Circular") immediately
+    shows "� Incomplete session (5 files completed)" with a "Resume
+    Indexing" button — even if you intend to upload completely
+    different files for a fresh build.
+
+  After:
+    Move the check to AFTER uploaded_files is evaluated.  Only show
+    "Resume Indexing" when at least one uploaded filename matches a
+    completed filename in the state.
+
+    state = read_ingest_state(safe_category)
+    has_incomplete_session = False
+    if state and uploaded_files and len(state.get("completed_files", [])) > 0:
+        uploaded_names = {f.name for f in uploaded_files}
+        completed_names = set(state["completed_files"])
+        has_incomplete_session = bool(uploaded_names & completed_names)
+
+  Change:  ~10 lines in local_builder.py.
+
+
+9. Empty API keys — no upfront validation
+────────────────────────────────────────────────────────
+
+  File:     app.py:150-156
+
+  Before:
+    gemini_keys = st.secrets.get("gemini", {}).get("api_keys", [])
+    groq_keys = st.secrets.get("groq", {}).get("api_keys", [])
+
+    Both arrays can be empty.  The app starts normally, lets the user
+    select an index, type a detailed technical query, shows "Searching
+    documents..." -> "Generating answer..." -> then after 30+ seconds:
+    "All LLM providers are temporarily unavailable."  No indication
+    that the root cause is zero keys configured.
+
+  After:
+    After secrets are loaded, validate that at least one key exists
+    for at least one provider.  If both are empty, show a clear error
+    immediately on startup with instructions to configure secrets.
+
+    if not gemini_keys and not groq_keys:
+        st.error(
+            "No API keys found.  Configure `.streamlit/secrets.toml` "
+            "with at least one provider's API key."
+        )
+        st.stop()
+
+  Change:  ~10 lines in app.py — validation block after line 156.
+
+
+10. Quota/error classifier over-broad + model exhaustion too aggressive
+────────────────────────────────────────────────────────────────────────
+
+  File:     model_selector.py:185-208, 274-285
+
+  Before:
+    _is_quota_or_rate_error uses substring matching on str(error).lower()
+    — "exceeded", "limit exceeded", "429", "too many requests" — and
+    catches broad Exception in the fallback loop.  A transient network
+    timeout or a non-quota error containing any of these substrings gets
+    classified as quota exhaustion, marking a key as exhausted for 10
+    minutes.  With only 1-2 keys per provider, one false positive can
+    rapidly exhaust all keys and break the app.
+
+  After:
+    1. Tighten _is_quota_or_rate_error to check exception TYPE first
+       (ResourceExhausted, RateLimitError, APIStatusError with
+       status_code 429/503), then substring as secondary heuristic.
+    2. In the fallback loop, catch only known provider exceptions;
+       let all other errors propagate with a traceback.
+
+    def _is_quota_or_rate_error(self, error: Exception) -> bool:
+        if isinstance(error, (ResourceExhausted, RateLimitError)):
+            return True
+        if isinstance(error, APIStatusError) and error.status_code in (429, 503):
+            return True
+        # substring heuristic only as last resort
+        error_str = str(error).lower()
+        return any(i in error_str for i in ['quota', 'rate_limit', 'ratelimit'])
+
+  Change:  ~15 lines in model_selector.py.
+
+
+11. Citation protocol inconsistency
+────────────────────────────────────────────────────────
+
+  File:     app.py:442-469
+
+  Before:
+    System prompt tells the LLM to output:
+        <used_chunks>[0, 2]</used_chunks>
+    But the context string in the user prompt is just:
+        "Context:\n{context_str}\n\nQuestion: ..."
+    where context_str = "\n\n---\n\n".join(context_parts)
+
+    The LLM sees chunk text but NO index labels.  It has to guess
+    which index corresponds to which chunk based on content alone.
+    Citations are unreliable — the LLM might reference index 2 when
+    it actually meant the 4th chunk, or vice versa.
+
+  After:
+    Label each chunk in the context string with its index:
+
+        context_str = "\n\n---\n\n".join(
+            f"[{i}] {c}" for i, c in enumerate(context_parts)
+        )
+
+    This gives the LLM explicit mapping between numbers and chunks.
+
+  Change:  ~3 lines in app.py — add enumerate labeling to context_str.
+
+
+12. No hard fallback for embedding stage failures
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:486-500
+
+  Before:
+    See Bug 2 (which covers embedding init).  This bug covers the
+    batch loop inside build_and_save_index.  If FAISS.from_documents()
+    or add_documents() fails mid-build due to CUDA OOM, there's no
+    per-batch recovery.  The entire index is lost.
+
+  After:
+    Wrap each batch processing in try/except:
+
+        try:
+            if vector_store is None:
+                vector_store = FAISS.from_documents(batch, embeddings)
+            else:
+                vector_store.add_documents(batch)
+        except (RuntimeError, torch.cuda.OutOfMemoryError):
+            logger.warning("CUDA OOM on batch %d, falling back to CPU", processed)
+            cpu_embeddings = HuggingFaceEmbeddings(
+                model_name=EMBEDDING_MODEL,
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": True},
+            )
+            # re-embed this batch on CPU
+            if vector_store is None:
+                vector_store = FAISS.from_documents(batch, cpu_embeddings)
+            else:
+                vector_store.add_documents(batch)
+
+  Change:  ~15 lines in ingest.py — per-batch fallback.
+
+
+13. Cache writes not crash-safe (no atomic write)
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:75-83
+
+  Before:
+    def _save_chunks_cache(file_hash, jsonl_path):
+        cache_path = _CACHE_DIR / f"{file_hash}.json"
+        chunks = list(_iter_jsonl(jsonl_path))
+        data = {"version": CACHE_VERSION, "chunks": chunks}
+        cache_path.write_text(json.dumps(data, ...), encoding="utf-8")
+
+    Writes directly to the final path.  An interrupt (power loss, OOM
+    kill) mid-write leaves a corrupt .json file that will fail on next
+    read.  Compare with _write_ingest_state which uses tmp + replace.
+
+  After:
+    Write to a temp file first, then atomic rename.
+
+    tmp = cache_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ...), encoding="utf-8")
+    tmp.replace(cache_path)
+
+  Change:  ~3 lines in ingest.py — temp-then-rename in
+           _save_chunks_cache.
+
+
+P2 — RELIABILITY / DEBUGGING / SECURITY
+================================================================================
+
+
+14. Interactive input() blocks automation (build_index.py)
+────────────────────────────────────────────────────────────────────────
+
+  File:     build_index.py:117
+
+  Before:
+    choice = input("   [R]esume or [F]resh? ").strip().lower()
+
+    In a CI script, cron job, or piped shell, input() raises EOFError
+    and the script crashes.  No CLI flags to pre-answer the question.
+
+  After:
+    Add --resume and --fresh CLI flags.  When stdin is not a TTY and
+    no flag is given, default to resume (safest option).
+
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--fresh", action="store_true")
+
+    if args.resume:
+        choice = "r"
+    elif args.fresh:
+        choice = "f"
+    elif sys.stdin.isatty():
+        choice = input("   [R]esume or [F]resh? ").strip().lower()
+    else:
+        choice = "r"    # non-interactive default
+
+  Change:  ~15 lines in build_index.py — argparse flags + conditional input.
+
+
+15. Broad exception masks index load root cause
+────────────────────────────────────────────────────────
+
+  File:     app.py:309-325
+
+  Before:
+    except Exception as e:
+        st.error(f"Failed to load index: {selected_index_name}")
+        st.info("Possible causes: model mismatch, GPU index, ...")
+
+    The actual error message (e.g. "dimension mismatch between 768 and
+    384", "model foo not found on HuggingFace") is only in logs.  The
+    UI shows a generic "Possible causes" list that the user can't
+    act on without digging through logs.
+
+  After:
+    Include the actual exception message prominently in the error
+    output, then keep the troubleshooting tips as supplementary.
+
+    except Exception as e:
+        st.error(f"Failed to load index: {e}")
+        st.info("Troubleshooting tips: model mismatch, GPU index, ...")
+
+  Change:  ~3 lines in app.py — include str(e) in st.error.
+
+
+16. Silent state fallback on JSON/state corruption
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:124
+
+  Before:
+    except Exception as e:
+        logger.warning(f"Failed to load state from {state_file}: {e}")
+    return {"completed_files": [], "total_files": 0}
+
+    A corrupted state file (truncated write, disk error, manual edit)
+    silently returns default empty state.  User gets a fresh start
+    with no warning that their previous session data was lost.
+
+  After:
+    Catch specific exceptions, log the actual error descriptively,
+    still return defaults.  Non-IO errors propagate.
+
+    except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+        logger.warning("event=state_corrupted file=%s error=%s",
+                       state_file, e)
+    return {"completed_files": [], "total_files": 0}
+
+  Change:  ~5 lines in ingest.py — narrow except + better log.
+
+
+17. Post-indexing-crash shows "Incomplete session" confusingly
+────────────────────────────────────────────────────────
+
+  File:     local_builder.py:72-82
+
+  Before:
+    After build_and_save_index crashes (ingest.py line 682), the
+    state file still shows all files as "completed."  Next launch:
+    "� Incomplete session (5 files completed)."  The message sounds
+    like files still need processing, but they're all chunked and
+    cached — only the FAISS/BM25 index build failed.
+
+  After:
+    Check if the index directory actually exists.  If all files are
+    "completed" but no index_dir, show a more specific message.
+
+    index_dir = _BUILD_DIR / f"{safe_category}_index"
+    all_done = state and len(state.get("completed_files", [])) >= state.get("total_files", 0)
+    if has_incomplete_session and all_done and not index_dir.is_dir():
+        st.sidebar.warning(
+            "All N files chunked, but the index build failed.  "
+            "Resume to retry the indexing step."
+        )
+
+  Change:  ~8 lines in local_builder.py.
+
+
+18. Wrong exception type in GLOBAL_SPLITTER fallback
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:349
+
+  Before:
+    except TypeError:
+        GLOBAL_SPLITTER = MarkdownTextSplitter(chunk_size=CHUNK_SIZE_CHARS, ...)
+
+    tiktoken.get_encoding("cl100k_base") raises KeyError for unknown
+    encoding names, not TypeError.  The except clause is dead code.
+    If a future tiktoken version removes cl100k_base, this crashes
+    at module import time instead of falling back gracefully.
+
+  After:
+    except (KeyError, TypeError):
+
+  Change:  1 line in ingest.py.
+
+
+19. Bare except Exception in page-resolution check
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:273
+
+  Before:
+    except Exception:
+        return True     # safe default — let GPU try
+
+    pdfium.PdfDocument() can fail for many reasons (corrupt file,
+    missing library, OOM).  Every error is silently swallowed and the
+    GPU path is attempted anyway -> potential GPU OOM cascade.
+
+  After:
+    except PdfiumError as e:
+        logger.warning("Could not check page resolution for %s: %s",
+                       page_path.name, e)
+        return True
+
+  Change:  ~3 lines in ingest.py — narrow to PdfiumError + log.
+
+
+20. Path traversal via uploaded filename
+────────────────────────────────────────────────────────
+
+  File:     local_builder.py:101
+
+  Before:
+    tmp_path = tmp_dir / uploaded_file.name
+    tmp_path.write_bytes(uploaded_file.getvalue())
+
+    A filename like "..\..\temp\evil.pdf" or "../../etc/malicious.pdf"
+    resolves outside the intended tmp_dir.  An attacker who controls
+    the filename could overwrite arbitrary files writable by the user.
+
+  After:
+    Sanitize filename to basename only.
+
+    safe_name = Path(uploaded_file.name).name   # strips dir components
+    tmp_path = tmp_dir / safe_name
+
+  Change:  1 line in local_builder.py.
+
+
+21. Streaming crashes on non-text LLM chunks
+────────────────────────────────────────────────────────
+
+  File:     app.py:490-491
+
+  Before:
+    for chunk in stream_generator:
+        stream_text += chunk.content
+
+    Some LangChain/LangGraph streaming implementations emit chunks
+    where .content is None (e.g. tool call deltas, structured outputs,
+    AI function calls).  This causes TypeError: can only concatenate
+    str (not "NoneType") to str and crashes the entire query.
+
+  After:
+    Guard the content type before concatenating.
+
+    for chunk in stream_generator:
+        if isinstance(chunk.content, str):
+            stream_text += chunk.content
+
+  Change:  1 line in app.py — add isinstance guard.
+
+
+22. Quadratic dedup complexity in retrieval
+────────────────────────────────────────────────────────
+
+  File:     utils.py:61-71
+
+  Before:
+    def deduplicate_chunks(documents, overlap_threshold=0.7):
+        unique_docs = []
+        for doc in documents:
+            for existing in unique_docs:
+                if _word_overlap_ratio(...) > overlap_threshold:
+                    is_duplicate = True; break
+            if not is_duplicate:
+                unique_docs.append(doc)
+
+    Each new document is compared against ALL prior unique documents.
+    O(n^2) complexity.  At k=20 (current RETRIEVAL_K) this is trivial
+    (400 calls).  But if k increases, this becomes a bottleneck.
+    Not urgent — noted as latent issue.
+
+  After:
+    No immediate change needed for k=20.  For future-proofing, could
+    use a Bloom filter or set of normalized hashes for O(n) dedup.
+
+  Change:  None (documented for awareness).
+
+
+P3 — MAINTENANCE / TOOLING
+================================================================================
+
+
+23. Project environment drift (requirements files)
+────────────────────────────────────────────────────────
+
+  Files:    requirements.txt, local_requirements.txt
+
+  Before:
+    Two requirement files with different packages and different pins.
+    - flashrank  installed but never imported
+    - groq       pinned in one, missing from the other
+    - langchain-huggingface  pinned in one, missing from the other
+    - numpy, pypdfium2  unpinned in one, missing from the other
+    Neither file alone installs a working environment.
+    Following the README ("install local then requirements") may
+    produce conflicting versions.
+
+  After:
+    Single requirements.txt with all deps and unified pins.
+    Delete local_requirements.txt (or make it a true documented
+    subset).  Remove dead deps (flashrank).  Add pytest to dev deps.
+    Verify with python -c "import <critical>" in CI.
+
+  Change:  Files consolidated, pins unified, dead deps removed.
+
+
+24. Documentation/runtime mismatch (READ ME)
+────────────────────────────────────────────────────────
+
+  File:     README.md
+
+  Before (claims vs reality):
+    Claim                         | Reality
+    ------------------------------|------------------------------
+    Flat API keys                 | Nested multi-key format
+    FlashRank reranker            | CrossEncoder from s-transformers
+    --google_api_key CLI flag     | smoke_test.py has no such flag
+    event=oom_fallback            | Log says "OOM on page %d"
+    60s retry on embedding        | EMBEDDING_RETRY_WAIT_SECS dead
+    Degrades to FAISS-only        | app.py has no BM25 path at all
+
+  After:
+    README updated to match actual secrets format, reranker, CLI,
+    log event names, and fallback paths.
+
+  Change:  ~30 lines in README.md.
+
+
+25. Dead code with active tests
+────────────────────────────────────────────────────────
+
+  Files:    utils.py:106-127, test_retrieval.py:169-203
+
+  Before:
+    process_citations() looks for [chunk_\d+] format in model output.
+    But extract_chunks() produces chunk IDs like "manual_v1_p3_12"
+    (not "chunk_0").  process_citations is never called in production.
+    Six tests exercise it — they all pass but give false confidence.
+
+    Also dead: Chunk dataclass (utils.py:23), EMBEDDING_RETRY_WAIT_SECS
+    (utils.py:18) — defined but never imported or used anywhere.
+
+  After:
+    Delete process_citations() and its tests.
+    Delete Chunk dataclass.
+    Delete EMBEDDING_RETRY_WAIT_SECS.
+
+  Change:  ~50 lines removed across 2 files.
+
+
+26. DIM = 768 in memory test (bge-base dimension, not bge-small)
+────────────────────────────────────────────────────────
+
+  File:     test_memory.py:19
+
+  Before:
+    DIM = 768       # bge-base dimension
+
+    Project switched to bge-small (384 dim) long ago.  The synthetic
+    test runs fine with any dimension, but its memory profile claims
+    embeddings are twice as large as they really are.  Can cause false
+    alarms or false confidence about RAM usage.
+
+  After:
+    DIM = 384
+
+  Change:  1 line in test_memory.py.
+
+
+27. _count_jsonl_lines reads deduped file twice
+────────────────────────────────────────────────────────
+
+  File:     ingest.py:479, 687
+
+  Before:
+    total = _count_jsonl_lines(deduped_jsonl)     # line 479 (inside build_and_save_index)
+    chunk_count = _count_jsonl_lines(deduped_path) # line 687 (after it returns)
+
+    The same deduped JSONL file is read from disk twice — once to
+    count for progress reporting, once more for the final return value.
+    ~3-5 seconds wasted I/O for large corpora.
+
+  After:
+    Return the count from build_and_save_index alongside the path.
+
+    def build_and_save_index(...) -> tuple[Path, int]:
+        ...
+        return index_dir, total
+
+    index_dir, chunk_count = build_and_save_index(...)
+
+  Change:  ~5 lines in ingest.py — return type changes from Path to tuple.
+
+
+28. editorapp "clean" script is Unix-only
+────────────────────────────────────────────────────────
+
+  File:     editorapp/package.json:10
+
+  Before:
+    "clean": "rm -rf dist server.js"
+
+    On Windows PowerShell: 'rm' is not recognized as a command.
+    npm run clean fails -> developer has to delete dist/ manually.
+
+  After:
+    "clean": "npx rimraf dist server.js"
+
+    Or inline cross-platform:
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('server.js',{force:true})\""
+
+  Change:  1 line in editorapp/package.json.
+
+
+29. allow_dangerous_deserialization=True in loaders
+────────────────────────────────────────────────────────
+
+  Files:    app.py:112, smoke_test.py:53
+
+  Before:
+    vector_store = FAISS.load_local(
+        str(index_path), embeddings,
+        allow_dangerous_deserialization=True,
+    )
+
+    The FAISS index.pkl file uses Python pickle.  An attacker who can
+    write to the index directory can inject arbitrary code execution.
+    The hash check (index.hash) mitigates tampering but doesn't
+    protect against a compromised build machine.
+
+  After:
+    Keep as-is — the hash check and README warning are sufficient for
+    this project's threat model (user builds their own indices).
+    Documented as a known risk.
+
+  Change:  None (documented for awareness).
+
+
+30. Committed runtime log artifacts
+────────────────────────────────────────────────────────
+
+  Files:    streamlit_out.txt, streamlit_err.txt
+
+  Before:
+    Runtime log files from previous Streamlit sessions are committed
+    to the repository.  Adds noise, stale diagnostics, and potential
+    credential exposure if any were accidentally logged.
+
+  After:
+    Add streamlit_*.txt to .gitignore.
+    Remove existing committed files.
+    Consider redirecting Streamlit logs to a logs/ directory that's
+    already in .gitignore.
+
+  Change:  3 lines in .gitignore + git rm.
+
+
+31. load_bm25_corpus is dead code in smoke_test.py
+────────────────────────────────────────────────────────
+
+  File:     smoke_test.py:62-74
+
+  Before:
+    def load_bm25_corpus(index_dir) -> list[Document]:
+        ...   # loads bm25_corpus.json
+        return documents
+
+    This function is defined but never called.  run_smoke_test (line 77)
+    only uses FAISS.  Dead code with no tests.
+
+  After:
+    Either remove the function, or integrate it into the smoke test
+    (e.g. load the corpus and verify it's non-empty).
+
+  Change:  ~15 lines removed or ~5 lines added depending on approach.
+
+
+32. Frontend generator can emit runtime-incompatible Python
+────────────────────────────────────────────────────────
+
+  File:     editorapp/src/utils/codeTransformer.ts:87
+
+  Before:
+    generateModelSelectorPy() emits a ModelSelector subclass with
+    constructor arguments and secrets handling.  If model_selector.py
+    or app.py's secrets schema changes, the generated code silently
+    becomes incompatible — import errors or runtime failures.
+
+  After:
+    Add golden tests that generate the Python file and import-check
+    it against the current backend.  CI should regenerate and verify.
+
+  Change:  Add golden test files + test script (no production code
+           change).
+
+
+================================================================================
+SUMMARY BY FILE
+================================================================================
+
+File                    | Bugs                                    | P0  P1  P2  P3
+------------------------|-----------------------------------------|----------------
+ingest.py               | 1,2,4,6,7,12,13,16,18,19,27            |  3   4   3   1
+app.py                  | 3,5,9,11,15,21                        |  1   2   2   -
+local_builder.py        | 1,8,17,20                              | (1)  1   2   -
+build_index.py          | 1,7,14                                | (1) (1)  1   -
+model_selector.py       | 10                                     |  -   1   -   -
+utils.py                | 22,25                                  |  -   -   1   1
+smoke_test.py           | 29,31                                  |  -   -   -   2
+test_memory.py          | 26                                     |  -   -   -   1
+test_retrieval.py       | 25                                     |  -   -   -   1
+README.md               | 24                                     |  -   -   -   1
+requirements*.txt       | 23                                     |  -   -   -   1
+editorapp/package.json  | 28                                     |  -   -   -   1
+editorapp/src/utils/    | 32                                     |  -   -   -   1
+.gitignore              | 30                                     |  -   -   -   1
+================================================================================
+Total: 32 bugs — 5 P0, 8 P1, 9 P2, 10 P3
+================================================================================

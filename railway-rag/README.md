@@ -29,12 +29,12 @@ This system processes railway PDFs using Docling for parsing and OCR, creates hy
 │       STREAMLIT CLOUD (~1 GB RAM)   │
 │  app.py                             │
 │  ┌──────────┐  ┌──────────────────┐ │
-│  │ FAISS +  │→ │ FlashRank Rerank │ │
-│  │ BM25     │  │ Token Budget     │ │
+│  │ FAISS    │→ │ CrossEncoder     │ │
+│  │          │  │ Reranker (v2-m3) │ │
 │  └──────────┘  └────────┬─────────┘ │
 │                         ↓           │
-│         Groq LLM → Gemini Fallback  │
-│         Programmatic Citation Map   │
+│         Gemini ↔ Groq LLM (rotated) │
+│         <used_chunks> citation map  │
 └─────────────────────────────────────┘
 ```
 
@@ -47,8 +47,7 @@ railway-rag/
 ├── app.py                         ← Streamlit Cloud retrieval UI
 ├── ingest.py                      ← Shared ingestion logic
 ├── utils.py                       ← Shared utility functions
-├── local_requirements.txt         ← Minimal deps for local ingestion
-├── requirements.txt               ← Full pinned deps (Cloud + local)
+├── requirements.txt               ← Pinned deps (all environments)
 ├── .gitignore
 ├── vector_indices/
 │   └── [Category]_index/
@@ -99,10 +98,7 @@ source venv/bin/activate
 # Install PyTorch FIRST (see GPU Setup for CUDA version)
 pip install torch==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
 
-# Install remaining dependencies (local ingestion only)
-pip install -r local_requirements.txt
-
-# For full Cloud deployment, also install:
+# Install all dependencies
 pip install -r requirements.txt
 ```
 
@@ -130,8 +126,11 @@ python build_index.py --category Signalling_Standards path/to/document1.pdf path
 Create `.streamlit/secrets.toml` (NEVER commit this file):
 
 ```toml
-GROQ_API_KEY = "gsk_your_groq_key_here"
-GEMINI_API_KEY = "your_gemini_key_here"
+[gemini]
+api_keys = ["your_gemini_key_here"]
+
+[groq]
+api_keys = ["gsk_your_groq_key_here"]
 ```
 
 On Streamlit Cloud, add these via the app's Secrets panel in the dashboard.
@@ -151,8 +150,7 @@ After ingestion, validate the index locally:
 ```bash
 python smoke_test.py \
     --index_dir ./vector_indices/Signalling_Standards_index \
-    --query "maximum permitted speed" \
-    --google_api_key YOUR_KEY
+    --query "maximum permitted speed"
 ```
 
 Expected output:
@@ -171,22 +169,21 @@ See `tests/` directory for individual test descriptions (Module 05).
 ## Troubleshooting
 
 ### OOM / CUDA errors:
-  The app automatically falls back to CPU processing on OOM.
-  If CPU fallback also fails, reduce the number of PDFs in a single session.
-  Check logs for: `event=oom_fallback`
+  The builder falls back to CPU per-batch on CUDA OOM.
+  Reranker uses bge-reranker-v2-m3 (~200 MB) with try/except disable.
+  Check logs for: `event=embedding_init_oom`, `event=embedding_batch_oom`
 
 ### OCR silent failure:
   Pages with garbage_ratio > 0.40 trigger automatic OCR re-processing.
   Check logs for: `event=ocr_trigger`
 
-### BM25 corpus missing:
-  If `bm25_corpus.json` is absent, the app degrades to FAISS-only retrieval.
-  Re-run `local_builder.py` to regenerate the corpus.
-  Check logs for: `event=bm25_missing`
+### Embedding fallback:
+  On CUDA OOM, batch size is halved and embedding moves to CPU.
+  Check logs for: `event=embedding_init_oom`, `event=embedding_batch_oom`
 
-### Embedding rate limits:
-  The builder waits 60 seconds and retries once automatically.
-  Check logs for: `event=embedding_rate_limit`
+### Reranker load failure:
+  If reranker model cannot be loaded (OOM, network), it is disabled.
+  Check logs for: `event=reranker_load_failed`
 
 ### Empty chunk count:
   If no chunks are extracted, verify PDFs are not password-protected and

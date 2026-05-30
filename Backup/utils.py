@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import sys
+from dataclasses import dataclass
 
 import tiktoken
 from langchain_core.documents import Document
@@ -9,13 +10,24 @@ from langchain_core.documents import Document
 logger = logging.getLogger(__name__)
 
 RETRIEVAL_K: int = 20
-FAISS_SIM_THRESHOLD: float = 0.35
 MAX_CONTEXT_TOKENS: int = 3500
 RESERVE_TOKENS: int = 500
 CHUNK_BUDGET: int = MAX_CONTEXT_TOKENS - RESERVE_TOKENS  # 3000
 TOKEN_BUDGET: int = CHUNK_BUDGET  # Alias for fallback compatibility
 
+EMBEDDING_RETRY_WAIT_SECS: int = 60
+
 _ENC = tiktoken.get_encoding("cl100k_base")
+
+@dataclass
+class Chunk:
+    text: str
+    source_file: str
+    page_number: int
+    chunk_id: str
+    char_start: int
+    char_end: int
+    token_count: int
 
 def count_tokens(text: str) -> int:
     return len(_ENC.encode(text))
@@ -68,27 +80,6 @@ def apply_source_diversity(documents: list[Document], max_per_page: int = 2) -> 
             result.append(doc)
     return result
 
-def mmr_diversity(documents: list[Document], lambda_: float = 0.5, max_docs: int = 8) -> list[Document]:
-    selected: list[Document] = []
-    candidates = list(documents)
-    while len(selected) < max_docs and candidates:
-        best_idx = -1
-        best_score = -1.0
-        for i, cand in enumerate(candidates):
-            rel = 1.0 / (candidates.index(cand) + 1)
-            if selected:
-                max_sim = max(_word_overlap_ratio(cand.page_content, s.page_content) for s in selected)
-            else:
-                max_sim = 0.0
-            mmr = lambda_ * rel - (1 - lambda_) * max_sim
-            if mmr > best_score:
-                best_score = mmr
-                best_idx = i
-        if best_idx >= 0:
-            selected.append(candidates.pop(best_idx))
-    return selected
-
-
 def parse_citations(text: str) -> tuple[str, list[int]]:
     """
     Parses <used_chunks>[0, 2]</used_chunks> from the text.
@@ -112,21 +103,25 @@ def parse_citations(text: str) -> tuple[str, list[int]]:
     
     return clean_text.strip(), indices
 
+def process_citations(response: str, citation_map: dict) -> tuple[str, list[str]]:
+    pattern = re.compile(r'\[(chunk_\d+)\]')
+    matches = pattern.findall(response)
 
-RRF_CONSTANT: int = 60
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+    for m in matches:
+        if m in citation_map:
+            if m not in seen:
+                seen.add(m)
+                ordered_ids.append(m)
+        else:
+            logger.warning("event=hallucinated_citation chunk_id=%s", m)
 
+    replacement = {cid: f"[Refer {i + 1}]" for i, cid in enumerate(ordered_ids)}
 
-def rrf_merge(faiss_results: list, bm25_results: list) -> list:
-    merged: dict[str, dict] = {}
-    for rank, (doc, score) in enumerate(faiss_results, 1):
-        cid = doc.metadata.get("chunk_id") or str(id(doc))
-        merged.setdefault(cid, {"doc": doc, "rrf": 0.0})
-        merged[cid]["rrf"] += 1.0 / (RRF_CONSTANT + rank)
-    for rank, (doc, score) in enumerate(bm25_results, 1):
-        cid = doc.metadata.get("chunk_id") or str(id(doc))
-        merged.setdefault(cid, {"doc": doc, "rrf": 0.0})
-        merged[cid]["rrf"] += 1.0 / (RRF_CONSTANT + rank)
-    sorted_docs = sorted(merged.values(), key=lambda x: x["rrf"], reverse=True)
-    return [item["doc"] for item in sorted_docs]
+    def _replacer(m: re.Match) -> str:
+        cid = m.group(1)
+        return replacement.get(cid, "")
 
-
+    processed = pattern.sub(_replacer, response).strip()
+    return processed, ordered_ids

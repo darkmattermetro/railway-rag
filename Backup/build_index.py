@@ -16,8 +16,11 @@ import sys
 import time
 from pathlib import Path
 
-from config import CATEGORY_MAX_LEN, MAX_FILE_SIZE_BYTES
-from ingest import ingest_pdfs, read_ingest_state, clear_cache, _get_file_hash
+from ingest import ingest_pdfs, read_ingest_state, clear_cache
+from local_builder import (
+    CATEGORY_MAX_LEN,
+    MAX_FILE_SIZE_BYTES,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,16 +45,6 @@ def main():
         "--recursive",
         action="store_true",
         help="Process PDFs recursively (requires --directory).",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume previous session (non-interactive).",
-    )
-    parser.add_argument(
-        "--fresh",
-        action="store_true",
-        help="Start fresh, clearing cache (non-interactive).",
     )
     parser.add_argument(
         "pdf_files",
@@ -113,25 +106,15 @@ def main():
 
     logger.info(f"Found {len(pdf_paths)} PDF files to process")
 
-    # Resume check (by file hash, not filename, to avoid collisions)
+    # Resume check
     state = read_ingest_state(safe_category)
     completed = set(state.get("completed_files", []))
-    file_hash_to_name = {_get_file_hash(Path(p)): Path(p).name for p in pdf_paths}
-    matching = completed & set(file_hash_to_name.keys())
+    filenames = {Path(p).name for p in pdf_paths}
+    matching = completed & filenames
     if matching:
-        matched_names = sorted(file_hash_to_name[h] for h in matching)
         print(f"\n\u26a0\ufe0f Incomplete session found: {len(matching)} of {len(pdf_paths)} files already processed.")
-        print(f"   Completed: {', '.join(matched_names)}")
-        if args.resume:
-            choice = "r"
-        elif args.fresh:
-            choice = "f"
-        elif sys.stdin.isatty():
-            choice = input("   [R]esume or [F]resh? ").strip().lower()
-            if not choice:
-                choice = "r"
-        else:
-            choice = "r"
+        print(f"   Completed: {', '.join(sorted(matching))}")
+        choice = input("   [R]esume or [F]resh? ").strip().lower()
         if choice and choice[0] == "f":
             clear_cache(safe_category, delete_chunks=True)
             print("   Starting fresh.\n")

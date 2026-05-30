@@ -1,0 +1,520 @@
+===============================================================================
+  RAILWAY RAG — COMPLETE BUG LIST & FIXES
+  Environment: GTX 1650 (4 GB VRAM), 8 GB RAM local / 1 GB RAM Streamlit Cloud
+  Last updated: 2026-05-27
+===============================================================================
+
+Round 1: 32 bugs (5 P0, 8 P1, 9 P2, 10 P3) — all fixed.
+Round 2: 17 issues found in code audit 2026-05-27 — listed below.
+
+Priority key:
+  P0 = Crash, data loss, or injection
+  P1 = Wrong results or broken UX
+  P2 = Reliability / debugging / security
+  P3 = Maintenance / tooling
+  🟡 = Design issue (not a bug, but worth fixing)
+
+
+P0 — CRASH / DATA LOSS
+================================================================================
+
+
+1. clear_cache on success destroys own category's cache
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:733
+
+  Before:
+    def ingest_pdfs(...):
+        ...
+        clear_cache(category, delete_chunks=True)
+        return {"chunk_count": chunk_count, "category": category}
+
+    Every successful run wipes the chunk cache.  If you have 100 PDFs
+    and want to add file #101, the existing 100 get fully re-processed.
+    Incremental indexing is broken — you start from zero every time.
+
+  After:
+    Remove the clear_cache call from the success path.  Cache is only
+    cleared when user explicitly clicks "Start Fresh" or passes --fresh.
+
+  Change:  Remove one line (ingest.py:733)
+
+
+2. CPU fallback in _embed_batch still uses GPU embeddings for existing index
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:525-541
+
+  Before:
+    def _embed_batch(batch_docs, vs):
+        try:
+            if vs is None:
+                return FAISS.from_documents(batch_docs, embeddings)
+            vs.add_documents(batch_docs)          # uses GPU embeddings
+            return vs
+        except (RuntimeError, torch.cuda.OutOfMemoryError):
+            cpu_embeddings = HuggingFaceEmbeddings(...)
+            if vs is None:
+                return FAISS.from_documents(batch_docs, cpu_embeddings)
+            vs.add_documents(batch_docs)          # STILL uses GPU embeddings!
+            return vs
+
+    On OOM for the second+ batch (when vs already exists), the except
+    block creates cpu_embeddings but still calls vs.add_documents()
+    which uses the GPU embeddings stored inside vs.  Same OOM repeats.
+
+  After:
+    On OOM for existing vs, create a new CPU FAISS index from the
+    failing batch, then merge it into vs with vs.merge_from().
+
+  Change:  ~10 lines in ingest.py — replace add_documents with
+           merge_from in the CPU fallback path
+
+
+3. smoke_test.py crashes on exit — missing import sys
+────────────────────────────────────────────────────────────────────────
+
+  File:     smoke_test.py:119,122
+
+  Before:
+    sys.exit(1)     # line 119
+    sys.exit(exit_code)    # line 122
+
+    "sys" is never imported.  Running the script raises:
+      NameError: name 'sys' is not defined
+
+  After:
+    Add "import sys" at the top of the file.
+
+  Change:  1 line (smoke_test.py)
+
+
+P1 — WRONG RESULTS / BROKEN UX
+================================================================================
+
+
+4. _save_page_chunks writes not atomic (corrupt file on crash)
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:119
+
+  Before:
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    Writes directly to the final path.  A crash mid-write leaves a
+    corrupt .json file.  _save_chunks_cache was fixed to use temp +
+    replace; _save_page_chunks was missed.
+
+  After:
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+  Change:  ~3 lines in ingest.py — temp-then-rename
+
+
+5. Progress bar double-counts pages on GPU→CPU fallback
+────────────────────────────────────────────────────────────────────────
+
+  Files:    ingest.py:305,311 — local_builder.py:176
+
+  Before:
+    _convert_page calls callback(page_no, "GPU", None) at line 305.
+    On OOM, it calls callback(page_no, "CPU", "OOM") at line 311.
+    Both fire PAGE_PROG events.  The handler increments global_pages_done
+    every time.  So a page needing fallback is counted twice.
+
+    For OCR-heavy documents, the bar hits 100% at ~50% real progress,
+    then stalls.  ETA goes negative and disappears.
+
+  After:
+    local_builder.py: increment global_pages_done only on PAGE_DONE,
+    not PAGE_PROG.  ingest.py: emit PAGE_DONE once per page after the
+    conversion decision (after fallback or CPU path).
+
+  Change:  ~8 lines across ingest.py and local_builder.py
+
+
+6. build_index.py resume print shows SHA-256 hashes, not filenames
+────────────────────────────────────────────────────────────────────────
+
+  File:     build_index.py:126
+
+  Before:
+    print(f"   Completed: {', '.join(sorted(matching))}")
+
+    matching is a set of 64-character SHA-256 hex strings.
+    The user sees:
+      Completed: a3f2b8c1...d4e5f6, c7d8e9f0...a1b2c3
+    instead of:
+      Completed: manual.pdf, safety_circ.pdf
+
+  After:
+    Build a {hash: filename} dict while collecting pdf_paths, then
+    map matching hashes back to filenames for the display.
+
+  Change:  ~5 lines in build_index.py
+
+
+P2 — RELIABILITY / DEBUGGING / SECURITY
+================================================================================
+
+
+7. PdfiumError not caught in page-resolution check
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:288-298
+
+  Before:
+    except (OSError, ValueError) as e:
+        return True
+
+    pypdfium2.PdfDocument() raises PdfiumError for corrupt PDFs,
+    missing permissions, unsupported formats.  The except clause
+    doesn't catch it — PdfiumError propagates and crashes ingestion.
+
+  After:
+    Import PdfiumError and add it to the except tuple.  Log at ERROR
+    level and return False (CPU safe default) on failure.
+
+  Change:  2 lines (import + except)
+
+
+8. Mid-stream failure doesn't update model exhaustion state
+────────────────────────────────────────────────────────────────────────
+
+  File:     model_selector.py:321-322
+
+  Before:
+    yield first_chunk
+    yield from stream_iter      # if this fails mid-stream...
+    return
+    ...
+    except Exception as e:
+        # model/key state NOT updated for mid-stream failures
+
+    If streaming succeeds for the first chunk but fails mid-response
+    (e.g., network timeout), the exception propagates through the
+    generator without calling _mark_key_exhausted or
+    _mark_model_exhausted.  Next query retries the same bad model/key.
+
+  After:
+    Wrap yield from stream_iter in try/except that updates exhaustion
+    state on failure then re-raises.
+
+  Change:  ~8 lines in model_selector.py
+
+
+9. FAISS index hash loads entire files into memory (OOM risk)
+────────────────────────────────────────────────────────────────────────
+
+  Files:    app.py:74-76, smoke_test.py:32-34
+
+  Before:
+    actual.update((index_path / "index.faiss").read_bytes())
+    actual.update((index_path / "index.pkl").read_bytes())
+
+    Path.read_bytes() loads the entire file into RAM.  For a 500 MB
+    index.faiss + 100 MB index.pkl, this is a 600 MB spike.  Combined
+    with embedding model (~100 MB) and cross-encoder (~200 MB), this
+    can OOM on Streamlit Cloud (1 GB RAM).
+
+  After:
+    Stream the file in 64 KB chunks:
+      with open(path, "rb") as f:
+          while chunk := f.read(65536):
+              actual.update(chunk)
+
+  Change:  ~12 lines — extract _hash_file() helper, use in both places
+
+
+10. No timeout on converter.convert() — indefinite hang
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:306,313,323,328,335,351,355
+
+  Before:
+    return converter.convert(page_path).document   # no timeout
+
+    A corrupt PDF page, hung GPU kernel, or stalled I/O can block
+    converter.convert() forever.  No way to abort — the entire build
+    hangs until the process is killed.
+
+  After:
+    Wrap conversion in ThreadPoolExecutor with a 300-second timeout.
+    On timeout, log the error and raise for the caller to handle.
+
+  Change:  ~15 lines in ingest.py (_convert_with_timeout wrapper)
+
+
+11. _convert_page_force_ocr OOM path silent (no callback, no return)
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:336-342
+
+  Before:
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower() or "alloc" in str(e).lower():
+            logger.warning("event=gpu_ocr_oom page=%d", page_no)
+            gc.collect()
+            torch.cuda.empty_cache()
+            # no callback, no return — falls through silently to CPU
+        else:
+            raise
+
+    The ConversionError handler (lines 343-351) correctly calls
+    callback(page_no, "CPU", "OOM") and returns from CPU converter.
+    The RuntimeError OOM path doesn't — execution falls through
+    silently to the CPU fallback at line 353.
+
+  After:
+    Mirror the ConversionError handler: add callback notification and
+    explicit return from CPU converter in the RuntimeError OOM path.
+
+  Change:  ~4 lines in ingest.py
+
+
+12. Unsafe FAISS deserialization remains enabled
+────────────────────────────────────────────────────────────────────────
+
+  Files:    app.py:112, smoke_test.py:51
+
+  Before:
+    vector_store = FAISS.load_local(
+        str(index_path), embeddings,
+        allow_dangerous_deserialization=True,
+    )
+
+    The FAISS index.pkl uses Python pickle.  An attacker who can write
+    to the index directory can inject arbitrary code execution.  The
+    hash check (index.hash) mitigates tampering but doesn't protect
+    against a compromised build machine.
+
+  After:
+    Keep as-is for now (hash check + README warning are sufficient for
+    this project's threat model).  Long-term: switch to safetensors or
+    signed artifact verification.
+
+  Change:  None (documented as accepted risk)
+
+
+13. CLI tool loads entire Streamlit module for two constants
+────────────────────────────────────────────────────────────────────────
+
+  File:     build_index.py:20
+
+  Before:
+    from local_builder import (
+        CATEGORY_MAX_LEN,
+        MAX_FILE_SIZE_BYTES,
+    )
+
+    local_builder.py imports streamlit at line 22.  Running
+    build_index.py loads streamlit (and its 100+ dependencies) just
+    for two integer constants.  ~2 seconds wasted on import, and
+    pointless for a CLI tool.
+
+  After:
+    Move CATEGORY_MAX_LEN and MAX_FILE_SIZE_BYTES to a neutral module
+    (e.g., config.py) that both build_index.py and local_builder.py
+    import from.  build_index.py no longer imports streamlit.
+
+  Change:  ~10 lines — create config.py, update two files
+
+
+P3 — MAINTENANCE / TOOLING
+================================================================================
+
+
+14. Code generator secrets schema doesn't match runtime
+────────────────────────────────────────────────────────────────────────
+
+  File:     editorapp/src/utils/codeTransformer.ts:20
+
+  Before:
+    newLines.push(`    ${p.id}_api_keys: list = st.secrets.get("${p.envPrefix}_API_KEYS", [""])`);
+
+    Generator produces:
+      gemini_api_keys: list = st.secrets.get("GEMINI_API_KEYS", [""])
+    But runtime app.py reads:
+      gemini_keys = st.secrets.get("gemini", {}).get("api_keys", [])
+
+    Generated code will fail at runtime — wrong key name, wrong
+    nesting, wrong structure.
+
+  After:
+    Update generator to match the runtime secrets format:
+    st.secrets.get("gemini", {}).get("api_keys", [])
+
+  Change:  ~3 lines in codeTransformer.ts
+
+
+15. Nested .git inside editorapp/
+────────────────────────────────────────────────────────────────────────
+
+  File:     editorapp/.git (directory)
+
+  Before:
+    editorapp/ has its own .git/ directory.  This creates confusion
+    for git operations on the parent repo — commands may not traverse
+    into it, and it acts as a separate repository.
+
+  After:
+    Remove the nested .git/ directory.  editorapp/ is part of the
+    main repo, not a submodule.
+
+  Change:  git rm -r editorapp/.git
+
+
+🟡 DESIGN ISSUES
+================================================================================
+
+
+16. Double PDF open before page splitting
+────────────────────────────────────────────────────────────────────────
+
+  File:     ingest.py:604-631
+
+  Before:
+    # Pass 1: count pages (lines 604-613)
+    r = pypdf.PdfReader(p_path)
+    cnt = len(r.pages)
+
+    # Pass 2: corruption check (lines 624-631)
+    r_check = pypdf.PdfReader(pdf_path)
+    _ = len(r_check.pages)
+
+    The same file is opened and read twice.  Pass 1 already validates
+    that the file is readable.  Pass 2 is redundant for any file that
+    didn't raise on pass 1.
+
+  After:
+    Remove pass 2.  The page-count pass already acts as a corruption
+    check.  If it raises PdfReadError, the file is skipped.
+
+  Change:  ~10 lines removed in ingest.py
+
+
+17. Duplicated fallback logic (invoke_with_fallback / stream_with_fallback)
+────────────────────────────────────────────────────────────────────────
+
+  File:     model_selector.py
+
+  Before:
+    Two 63-line methods that are structurally identical.  The only
+    difference is llm.invoke(messages) vs llm.stream(messages).
+    Any fix to the retry/rotation logic must be applied twice.
+
+  After:
+    Extract the shared provider/retry/rotation logic into a private
+    _try_providers(invoke_fn) method.  Both public methods call it
+    with a lambda for invoke vs stream.
+
+  Change:  ~50 lines — extract shared logic, shrink both methods
+
+
+18. Duplicated word overlap function
+────────────────────────────────────────────────────────────────────────
+
+  Files:    app.py:59, utils.py:40
+
+  Before:
+    app.py defines _calculate_text_overlap() which is identical to
+    _word_overlap_ratio() in utils.py.  app.py already imports from
+    utils.py — it should just reuse the existing function.
+
+  After:
+    Remove _calculate_text_overlap from app.py.  Import and use
+    _word_overlap_ratio from utils.py instead.
+
+  Change:  ~10 lines removed in app.py
+
+
+19. SYSTEM_PROMPT rebuilt on every query
+────────────────────────────────────────────────────────────────────────
+
+  File:     app.py:459
+
+  Before:
+    def main():
+        ...
+        for query in queries:
+            SYSTEM_PROMPT: str = (
+                "You are a technical rail analyst..."
+                ...
+            )
+
+    The string has no dynamic parts but is constructed inside the
+    hot loop on every query.  Unnecessary string object allocation.
+
+  After:
+    Move SYSTEM_PROMPT to module level (outside main()), just below
+    the other constants like RERANKER_MODEL, COOLDOWN_SECONDS, etc.
+
+  Change:  ~20 lines moved in app.py
+
+
+20. Progress bar resets to 0% when indexing begins
+────────────────────────────────────────────────────────────────────────
+
+  File:     local_builder.py:185
+
+  Before:
+    elif event == "BUILDING_INDEX":
+        progress_bar.progress(0.0)    # bar snaps back to empty
+
+    The user just watched extraction reach 100%, then the bar
+    suddenly drops to 0% for the indexing phase.  Confusing.
+
+  After:
+    Use sub-ranges: extraction = 0-80%, indexing = 80-100%.
+    progress_bar.progress(80/100 * phase_progress) during extraction,
+    then progress_bar.progress(80 + 20 * phase_progress) during
+    indexing.  Bar never resets.
+
+  Change:  ~5 lines in local_builder.py
+
+
+21. Broad except Exception in runtime paths
+────────────────────────────────────────────────────────────────────────
+
+  Files:    app.py:320, app.py:536
+
+  Before:
+    except Exception as e:
+        st.error(f"Failed to load index: {selected_index_name}")
+        ...
+
+    except Exception as e:
+        st.error("All LLM providers...")
+
+    Catch-all Exception hides root causes.  A programming bug
+    (e.g., KeyError, TypeError) gets caught and shows a generic
+    error instead of crashing with a traceback.
+
+  After:
+    Catch specific exception types.  For index loading: catch
+    RuntimeError, FileNotFoundError, ValueError.  For LLM: let
+    non-API exceptions propagate.  Include structured error info.
+
+  Change:  ~5 lines in app.py
+
+
+===============================================================================
+SUMMARY BY FILE
+===============================================================================
+
+File                    | Bugs
+------------------------|---------------------------
+ingest.py               | 1,2,4,5,7,10,11,16
+app.py                  | 9,12,18,19,21
+model_selector.py       | 8,17
+build_index.py          | 6,13
+local_builder.py        | 5,20
+smoke_test.py           | 3,9,12
+editorapp/src/utils/    | 14
+editorapp/              | 15
+===============================================================================
+Total: 21 issues — 3 P0, 3 P1, 7 P2, 3 P3, 5 🟡 design issues
+===============================================================================

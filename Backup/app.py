@@ -7,6 +7,7 @@ Runs within ~1 GB RAM constraint on Streamlit Cloud.
 
 import hashlib
 import logging
+import os
 import random
 import time
 import re
@@ -15,13 +16,8 @@ from pathlib import Path
 import streamlit as st
 import tiktoken
 from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
-from google.api_core.exceptions import GoogleAPIError
-from groq import APIStatusError, APITimeoutError, RateLimitError
 from utils import (
     apply_source_diversity,
     deduplicate_chunks,
@@ -45,9 +41,10 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 COOLDOWN_SECONDS: float = 1.0
 GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
-GROQ_TIMEOUT: int = 45
 GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
 RERANKER_TOP_N: int = 8
+RERANKER_ENABLED: bool = os.environ.get("RERANKER_ENABLED", "0") == "1"
+RERANKER_MODEL: str = "BAAI/bge-reranker-base"
 MAX_CITATION_EXPANDERS: int = 5
 INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
 _ENC = tiktoken.get_encoding("cl100k_base")
@@ -61,7 +58,6 @@ def _token_length(text: str) -> int:
 
 def _calculate_text_overlap(text1: str, text2: str) -> float:
     """Calculates a simple word-overlap score between two strings."""
-    import re
     words1 = set(re.findall(r"\b[a-z0-9]+\b", text1.lower()))
     words2 = set(re.findall(r"\b[a-z0-9]+\b", text2.lower()))
     if not words1 or not words2:
@@ -69,7 +65,7 @@ def _calculate_text_overlap(text1: str, text2: str) -> float:
     return len(words1 & words2) / max(len(words1), len(words2))
 
 
-@st.cache_resource
+@st.cache_resource(max_entries=1)
 def load_vector_index(index_path: Path) -> FAISS:
     """Load FAISS index from disk with integrity check."""
     hash_path = index_path / "index.hash"
@@ -93,14 +89,14 @@ def load_vector_index(index_path: Path) -> FAISS:
     # Example content:
     #   BAAI/bge-small-en-v1.5
     #
-    # Falls back to bge-base if no file exists.
+    # Falls back to bge-small if no file exists.
     # --------------------------------------------------------------------
     model_file = index_path / "embedding_model.txt"
 
     if model_file.exists():
         model_name = model_file.read_text().strip()
     else:
-        model_name = "BAAI/bge-base-en-v1.5"
+        model_name = "BAAI/bge-small-en-v1.5"
 
     logger.info("Loading embedding model: %s", model_name)
 
@@ -116,6 +112,16 @@ def load_vector_index(index_path: Path) -> FAISS:
         allow_dangerous_deserialization=True,
     )
     return vector_store
+
+
+@st.cache_resource
+def load_reranker():
+    if not RERANKER_ENABLED:
+        return None
+    from sentence_transformers import CrossEncoder
+    logger.info("Loading reranker model: %s", RERANKER_MODEL)
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    return CrossEncoder(RERANKER_MODEL, device=device)
 
 
 def discover_indices() -> list[Path]:
@@ -384,10 +390,16 @@ def main() -> None:
 
             deduped_docs = deduplicate_chunks(raw_docs)
             diverse_docs = apply_source_diversity(deduped_docs, max_per_page=2)
-            reranked_docs: list[Document] = diverse_docs[:RERANKER_TOP_N]
+            if reranker := load_reranker():
+                pairs = [[user_query, doc.page_content] for doc in diverse_docs]
+                scores = reranker.predict(pairs)
+                scored = sorted(zip(scores, diverse_docs), key=lambda x: x[0], reverse=True)
+                reranked_docs = [doc for _, doc in scored[:RERANKER_TOP_N]]
+            else:
+                reranked_docs = diverse_docs[:RERANKER_TOP_N]
 
             logger.info(
-                "event=retrieval_complete raw=%d deduped=%d diverse=%d final=%d",
+                "event=retrieval_complete raw=%d deduped=%d diverse=%d reranked=%d",
                 len(raw_docs),
                 len(deduped_docs),
                 len(diverse_docs),
