@@ -16,7 +16,7 @@ from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
 
-DIM = 768
+DIM = 384
 NUM_DOCS = 500
 QUERIES = [
     "maximum permitted speed",

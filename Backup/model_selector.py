@@ -97,7 +97,7 @@ class ModelSelector:
     # ------------------------------------------------------------------
 
     def _is_model_available(self, model_name: str) -> bool:
-        """"Check if a model is available (not exhausted or in cooldown)"""
+        """Check if a model is available (not exhausted or in cooldown)"""
         state = self.model_states.get(model_name)
         if not state:
             return False
@@ -184,13 +184,28 @@ class ModelSelector:
 
     def _is_quota_or_rate_error(self, error: Exception) -> bool:
         """Check if error is related to quota or rate limits"""
-        if isinstance(error, (ResourceExhausted, RateLimitError)):
-            return True
-        if isinstance(error, APIStatusError) and getattr(error, 'status_code', None) in (429, 503):
-            return True
         error_str = str(error).lower()
-        quota_indicators = ['quota', 'rate_limit', 'ratelimit']
-        return any(i in error_str for i in quota_indicators)
+        error_type = type(error).__name__
+
+        quota_indicators = [
+            'resource_exhausted', 'quota', '429', 'rate_limit',
+            'ratelimit', 'exceeded', 'limit exceeded', 'too many requests'
+        ]
+        quota_exception_types = ['ResourceExhausted', 'RateLimitError', 'APIStatusError']
+
+        if error_type in quota_exception_types:
+            if error_type == 'APIStatusError':
+                if hasattr(error, 'code') and str(error.code) in ['429', '503']:
+                    return True
+                if any(indicator in error_str for indicator in quota_indicators):
+                    return True
+            else:
+                return True
+
+        if any(indicator in error_str for indicator in quota_indicators):
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # LLM instance factory
@@ -265,11 +280,9 @@ class ModelSelector:
                         if self._is_quota_or_rate_error(e):
                             self._mark_key_exhausted(provider, key_idx)
                             continue
-                        elif isinstance(e, (APITimeoutError, ServiceUnavailable, GoogleAPIError)):
+                        else:
                             self._mark_model_exhausted(model_name, e)
                             break
-                        else:
-                            raise
 
                 if keys_exhausted:
                     break
@@ -319,18 +332,7 @@ class ModelSelector:
                         self.last_provider = f"{provider.capitalize()} ({model_name})"
 
                         yield first_chunk
-                        try:
-                            yield from stream_iter
-                        except Exception as e:
-                            last_error = e
-                            logger.warning(
-                                f"event=llm_stream_mid_failure model={model_name} provider={provider} key={key_idx} error={type(e).__name__}"
-                            )
-                            if self._is_quota_or_rate_error(e):
-                                self._mark_key_exhausted(provider, key_idx)
-                            elif isinstance(e, (APITimeoutError, ServiceUnavailable, GoogleAPIError)):
-                                self._mark_model_exhausted(model_name, e)
-                            raise
+                        yield from stream_iter
                         return
                     except StopIteration:
                         self.last_provider = f"{provider.capitalize()} ({model_name})"
@@ -344,11 +346,9 @@ class ModelSelector:
                         if self._is_quota_or_rate_error(e):
                             self._mark_key_exhausted(provider, key_idx)
                             continue
-                        elif isinstance(e, (APITimeoutError, ServiceUnavailable, GoogleAPIError)):
+                        else:
                             self._mark_model_exhausted(model_name, e)
                             break
-                        else:
-                            raise
 
                 if keys_exhausted:
                     break

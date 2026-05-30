@@ -16,17 +16,12 @@ from pathlib import Path
 import streamlit as st
 import tiktoken
 from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_huggingface import HuggingFaceEmbeddings
 from utils import (
-    _word_overlap_ratio,
     apply_source_diversity,
     deduplicate_chunks,
-    mmr_diversity,
     parse_citations,
-    rrf_merge,
-    FAISS_SIM_THRESHOLD,
     RETRIEVAL_K,
     TOKEN_BUDGET,
 )
@@ -49,37 +44,25 @@ GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
 GEMINI_PRIMARY_MODEL: str = "gemini-2.5-flash"
 RERANKER_TOP_N: int = 8
 RERANKER_ENABLED: bool = os.environ.get("RERANKER_ENABLED", "0") == "1"
-RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+RERANKER_MODEL: str = "BAAI/bge-reranker-base"
 MAX_CITATION_EXPANDERS: int = 5
 INDEX_DIR: Path = Path(__file__).resolve().parent / "vector_indices"
 _ENC = tiktoken.get_encoding("cl100k_base")
-
-SYSTEM_PROMPT: str = (
-    "You are a technical rail analyst for DMRC.\n"
-    "Answer using the provided context blocks as your primary source.\n"
-    "Search across all available context blocks — they may come from "
-    "multiple documents. Synthesize information from all relevant sources.\n\n"
-    "If information is not directly in context, you may make reasonable "
-    "inferences based on related content. You MUST wrap any inferred information inside <inferred> and </inferred> tags.\n\n"
-    "Never fabricate metrics, speeds, telemetry, or calculations.\n\n"
-    "Examples:\n"
-    "- Acceptable: '<inferred>The signal head is approximately 2.5m high (based on mast dimensions on page 8).</inferred>'\n"
-    "- NOT acceptable: Making up a speed value, clearance point, or "
-    "measurement not found anywhere in the provided documents.\n\n"
-    "Synthesize the information. Do NOT repeat the same point "
-    "multiple times — if multiple chunks contain the same "
-    "information, state it once.\n\n"
-    "At the end of your answer append:\n"
-    "<used_chunks>[0, 2]</used_chunks>\n\n"
-    "The values inside used_chunks must be integers only — "
-    "not ranges, not strings."
-)
 
 # ----------------------------------------------------------------------------
 # Helper functions
 # ----------------------------------------------------------------------------
 def _token_length(text: str) -> int:
     return len(_ENC.encode(text))
+
+
+def _calculate_text_overlap(text1: str, text2: str) -> float:
+    """Calculates a simple word-overlap score between two strings."""
+    words1 = set(re.findall(r"\b[a-z0-9]+\b", text1.lower()))
+    words2 = set(re.findall(r"\b[a-z0-9]+\b", text2.lower()))
+    if not words1 or not words2:
+        return 0.0
+    return len(words1 & words2) / max(len(words1), len(words2))
 
 
 @st.cache_resource(max_entries=1)
@@ -89,10 +72,8 @@ def load_vector_index(index_path: Path) -> FAISS:
     if hash_path.exists():
         expected = hash_path.read_text().strip()
         actual = hashlib.sha256()
-        for fname in ("index.faiss", "index.pkl"):
-            with open(index_path / fname, "rb") as f:
-                while chunk := f.read(65536):
-                    actual.update(chunk)
+        actual.update((index_path / "index.faiss").read_bytes())
+        actual.update((index_path / "index.pkl").read_bytes())
         if actual.hexdigest() != expected:
             raise RuntimeError(f"FAISS index integrity mismatch at {index_path}")
     # --------------------------------------------------------------------
@@ -133,65 +114,14 @@ def load_vector_index(index_path: Path) -> FAISS:
     return vector_store
 
 
-def _check_available_memory_mb():
-    for path in [
-        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-        "/sys/fs/cgroup/memory.max",
-    ]:
-        try:
-            with open(path) as f:
-                val = f.read().strip()
-                if val != "max":
-                    limit_mb = int(val) // (1024 * 1024)
-                    if limit_mb < 1500:
-                        return limit_mb
-        except (FileNotFoundError, ValueError, OSError):
-            continue
-    try:
-        import psutil
-        return int(psutil.virtual_memory().available / (1024 * 1024))
-    except ImportError:
-        return None
-
-
-_RERANKER_MIN_MB = 600
-
-
 @st.cache_resource
 def load_reranker():
     if not RERANKER_ENABLED:
         return None
-    avail_mb = _check_available_memory_mb()
-    if avail_mb is not None and avail_mb < _RERANKER_MIN_MB:
-        logger.warning(
-            "event=reranker_skipped reason=low_memory available_limit_mb=%d min_required_mb=%d",
-            avail_mb, _RERANKER_MIN_MB,
-        )
-        return None
-    try:
-        from sentence_transformers import CrossEncoder
-        logger.info("Loading reranker model: %s", RERANKER_MODEL)
-        device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
-        return CrossEncoder(RERANKER_MODEL, device=device)
-    except Exception:
-        logger.warning("event=reranker_load_failed — disabling reranker")
-        return None
-
-
-@st.cache_resource(max_entries=2)
-def load_bm25_index(index_path: Path):
-    corpus_path = index_path / "bm25_corpus.json"
-    if not corpus_path.exists():
-        logger.info("event=bm25_corpus_not_found path=%s", corpus_path)
-        return None, []
-    from rank_bm25 import BM25Okapi
-    with open(corpus_path, "r", encoding="utf-8") as f:
-        entries = json.load(f)
-    texts = [e["text"] for e in entries]
-    tokenized = [text.lower().split() for text in texts]
-    bm25 = BM25Okapi(tokenized)
-    logger.info("event=bm25_index_loaded entries=%d", len(entries))
-    return bm25, entries
+    from sentence_transformers import CrossEncoder
+    logger.info("Loading reranker model: %s", RERANKER_MODEL)
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    return CrossEncoder(RERANKER_MODEL, device=device)
 
 
 def discover_indices() -> list[Path]:
@@ -224,13 +154,6 @@ def main() -> None:
     groq_keys = st.secrets.get("groq", {}).get("api_keys", [])
     if not groq_keys and "GROQ_API_KEY" in st.secrets:
         groq_keys = [st.secrets["GROQ_API_KEY"]]
-
-    if not gemini_keys and not groq_keys:
-        st.error(
-            "No API keys found. Configure `.streamlit/secrets.toml` "
-            "with at least one provider's API key."
-        )
-        st.stop()
 
     # --------------------------------------------------------------------
     # Session state initialization
@@ -320,7 +243,7 @@ def main() -> None:
 
     .stAlert { border-left: 3px solid #003366; background: #F0F4F8; border-radius: 4px; }
 
-    div.stMarkdown blockquote {
+    .ai-inferred {
         background-color: #FFF3CD;
         border-left: 4px solid #FFC107;
         padding: 0.75rem 1rem;
@@ -330,7 +253,7 @@ def main() -> None:
         font-size: 0.95rem;
         line-height: 1.5;
     }
-    div.stMarkdown blockquote strong {
+    .ai-inferred strong {
         color: #664D03;
         margin-right: 0.25rem;
     }
@@ -383,7 +306,7 @@ def main() -> None:
                     faiss_docs_count,
                 )
 
-            except (RuntimeError, FileNotFoundError, ValueError) as e:
+            except Exception as e:
                 logger.exception("Failed to load vector index")
 
                 st.error(
@@ -406,13 +329,7 @@ def main() -> None:
     # --------------------------------------------------------------------
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            content = re.sub(
-                r'<inferred>(.*?)</inferred>',
-                r'> **🧠 AI Gen:** \1',
-                message["content"],
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-            st.markdown(content)
+            st.markdown(message["content"], unsafe_allow_html=True)
 
     if last_llm := st.session_state.get("last_llm"):
         st.caption(f"{last_llm}")
@@ -443,11 +360,13 @@ def main() -> None:
             st.markdown(user_query)
 
         # --------------------------------------------------------------------
-        # LLM Setup (for query rewriting, condensation, and generation)
+        # LLM Setup (for query condensation and final generation)
         # --------------------------------------------------------------------
+        # Get model lists from secrets with fallbacks to original values
         gemini_models = st.secrets.get("gemini", {}).get("models", [GEMINI_PRIMARY_MODEL])
         groq_models = st.secrets.get("groq", {}).get("models", [GROQ_FALLBACK_MODEL])
 
+        # Initialize model selector with session-persistent key/model state
         if "llm_state" not in st.session_state:
             st.session_state.llm_state = {}
         llm_selector = ModelSelector(
@@ -459,59 +378,18 @@ def main() -> None:
             session_state=st.session_state.llm_state,
         )
 
-        # Query rewriting: expand user query with LLM-generated variants
-        queries_to_search = [user_query]
-        rewrite_prompt = (
-            f"Generate 2 alternative phrasings of this railway query "
-            f"that might match different technical terminology.\n"
-            f"Original: {user_query}\n"
-            f"Return one variant per line, no prefixes."
-        )
-        rewrite_messages = [
-            SystemMessage(content="You are a search query expansion assistant. Output only the variant queries, one per line."),
-            HumanMessage(content=rewrite_prompt),
-        ]
-        try:
-            rewrite_result = llm_selector.invoke_with_fallback(rewrite_messages)
-            variants = [line.strip() for line in rewrite_result.strip().split("\n") if line.strip()]
-            for v in variants:
-                if v.lower() != user_query.lower() and v not in queries_to_search:
-                    queries_to_search.append(v)
-            logger.info("event=query_rewrite variants=%d queries=%s", len(queries_to_search) - 1, queries_to_search)
-        except Exception as e:
-            logger.warning("event=query_rewrite_failed error=%s", e)
-
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
             response_placeholder.markdown('<div class="status-msg">Searching documents...</div>', unsafe_allow_html=True)
 
             # ----------------------------------------------------------------
-            # Hybrid Retrieval: multi-query FAISS + BM25 with RRF merge
+            # Retrieval via FAISS direct similarity
             # ----------------------------------------------------------------
-            bm25, corpus_entries = load_bm25_index(selected_index_path)
-            seen_cids: set[str] = set()
-            merged_docs: list[Document] = []
-            for q in queries_to_search:
-                docs_with_scores = vector_store.similarity_search_with_score(q, k=RETRIEVAL_K)
-                faiss_filtered = [(doc, score) for doc, score in docs_with_scores if score >= FAISS_SIM_THRESHOLD]
-                if bm25:
-                    tokenized_q = q.lower().split()
-                    bm25_scores = bm25.get_scores(tokenized_q)
-                    top_idx = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:RETRIEVAL_K]
-                    bm25_docs = [(Document(page_content=corpus_entries[idx]["text"],
-                                          metadata=corpus_entries[idx].get("metadata", {})),
-                                  bm25_scores[idx]) for idx in top_idx]
-                    query_merged = rrf_merge(faiss_filtered, bm25_docs)
-                else:
-                    query_merged = [doc for doc, _ in faiss_filtered]
-                for doc in query_merged:
-                    cid = doc.metadata.get("chunk_id") or str(id(doc))
-                    if cid not in seen_cids:
-                        seen_cids.add(cid)
-                        merged_docs.append(doc)
+            docs_with_scores = vector_store.similarity_search_with_score(user_query, k=RETRIEVAL_K)
+            raw_docs = [doc for doc, _score in docs_with_scores]
 
-            deduped_docs = deduplicate_chunks(merged_docs)
-            diverse_docs = mmr_diversity(deduped_docs)
+            deduped_docs = deduplicate_chunks(raw_docs)
+            diverse_docs = apply_source_diversity(deduped_docs, max_per_page=2)
             if reranker := load_reranker():
                 pairs = [[user_query, doc.page_content] for doc in diverse_docs]
                 scores = reranker.predict(pairs)
@@ -520,32 +398,22 @@ def main() -> None:
             else:
                 reranked_docs = diverse_docs[:RERANKER_TOP_N]
 
-                logger.info(
-                "event=retrieval_complete merged=%d deduped=%d diverse=%d reranked=%d",
-                len(merged_docs),
+            logger.info(
+                "event=retrieval_complete raw=%d deduped=%d diverse=%d reranked=%d",
+                len(raw_docs),
                 len(deduped_docs),
                 len(diverse_docs),
                 len(reranked_docs),
             )
 
             # ----------------------------------------------------------------
-            # Score-aware token budget
-            #   When reranker is active, weights are proportional to actual
-            #   cross-encoder scores.  Otherwise fall back to position-based
-            #   weights with finer granularity.
+            # Score-weighted token budget
+            #   Rank 1-2: full chunk text
+            #   Rank 3-4: up to 60% of chunk
+            #   Rank 5-6: up to 35% of chunk
+            #   Rank 7-8: up to 25% of chunk
             # ----------------------------------------------------------------
-            if reranker:
-                available_scores = [score for score, _ in scored[:RERANKER_TOP_N]]
-                min_s = min(available_scores) if available_scores else 0
-                max_s = max(available_scores) if available_scores else 1
-                span = max_s - min_s
-                if span > 0:
-                    chunk_weights = [(s - min_s) / span for s in available_scores]
-                else:
-                    chunk_weights = [1.0] * len(available_scores)
-            else:
-                n = len(reranked_docs)
-                chunk_weights = [max(0.25, 1.0 - i * 0.12) for i in range(n)]
+            chunk_weights = [1.0, 1.0, 0.6, 0.6, 0.35, 0.35, 0.25, 0.25]
             context_parts: list[str] = []
             total_tokens: int = 0
 
@@ -571,9 +439,28 @@ def main() -> None:
             # ----------------------------------------------------------------
             # Build prompt
             # ----------------------------------------------------------------
-            context_str: str = "\n\n---\n\n".join(
-                f"[{i}] {c}" for i, c in enumerate(context_parts)
+            SYSTEM_PROMPT: str = (
+                "You are a technical rail analyst for DMRC.\n"
+                "Answer using the provided context blocks as your primary source.\n"
+                "Search across all available context blocks — they may come from "
+                "multiple documents. Synthesize information from all relevant sources.\n\n"
+                "If information is not directly in context, you may make reasonable "
+                "inferences based on related content. You MUST wrap any inferred information inside <inferred> and </inferred> tags.\n\n"
+                "Never fabricate metrics, speeds, telemetry, or calculations.\n\n"
+                "Examples:\n"
+                "- Acceptable: '<inferred>The signal head is approximately 2.5m high (based on mast dimensions on page 8).</inferred>'\n"
+                "- NOT acceptable: Making up a speed value, clearance point, or "
+                "measurement not found anywhere in the provided documents.\n\n"
+                "Synthesize the information. Do NOT repeat the same point "
+                "multiple times — if multiple chunks contain the same "
+                "information, state it once.\n\n"
+                "At the end of your answer append:\n"
+                "<used_chunks>[0, 2]</used_chunks>\n\n"
+                "The values inside used_chunks must be integers only — "
+                "not ranges, not strings."
             )
+
+            context_str: str = "\n\n---\n\n".join(context_parts)
             user_prompt: str = (
                 f"Context:\n{context_str}\n\n"
                 f"Question: {user_query}\n\n"
@@ -601,8 +488,7 @@ def main() -> None:
                 # Stream the response chunk by chunk to Streamlit
                 stream_text = ""
                 for chunk in stream_generator:
-                    if isinstance(chunk.content, str):
-                        stream_text += chunk.content
+                    stream_text += chunk.content
                     
                     # Intercept `<used_chunks>` from display buffer so it doesn't render live
                     display_text = re.sub(r'<used_chunks>.*', '', stream_text, flags=re.DOTALL)
@@ -610,12 +496,12 @@ def main() -> None:
                     # Format <inferred> blocks live if they exist
                     display_text = re.sub(
                         r'<inferred>(.*?)</inferred>',
-                        r'> **🧠 AI Gen:** \1',
+                        r'<div class="ai-inferred"><strong>AI Gen:</strong>\1</div>',
                         display_text,
                         flags=re.IGNORECASE | re.DOTALL
                     )
                     
-                    response_placeholder.markdown(display_text + "▌")
+                    response_placeholder.markdown(display_text + "▌", unsafe_allow_html=True)
                 
                 full_response = stream_text
                 st.session_state.last_llm = llm_selector.last_provider
@@ -627,6 +513,13 @@ def main() -> None:
                 )
                 st.error("All LLM providers are temporarily unavailable due to quota limits. Please try again later.")
                 st.stop()
+            except Exception as e:
+                logger.error(
+                    "event=llm_unexpected_error error=%s",
+                    str(e)[:200],
+                )
+                st.error("An unexpected error occurred. Please try again later.")
+                st.stop()
 
             # ----------------------------------------------------------------
             # Citation synthesis (programmatic, not trusting LLM)
@@ -635,7 +528,7 @@ def main() -> None:
 
             display_response = re.sub(
                 r'<inferred>(.*?)</inferred>',
-                r'> **🧠 AI Gen:** \1',
+                r'<div class="ai-inferred"><strong>AI Gen:</strong>\1</div>',
                 display_response,
                 flags=re.IGNORECASE | re.DOTALL
             )
@@ -649,7 +542,7 @@ def main() -> None:
                 # Calculate scores and store as (score, original_index)
                 scored_indices = []
                 for idx in valid_indices:
-                    score = _word_overlap_ratio(display_response, reranked_docs[idx].page_content)
+                    score = _calculate_text_overlap(display_response, reranked_docs[idx].page_content)
                     scored_indices.append((score, idx))
                 
                 # Sort by score (descending), then by original index (ascending) for stability
@@ -671,15 +564,11 @@ def main() -> None:
                     doc = reranked_docs[idx]
                     source: str = doc.metadata.get("source", "unknown")
                     page: str = str(doc.metadata.get("page_number", "?"))
-                    heading: str = doc.metadata.get("heading", "")
                     citation_key: str = f"{source}:{page}"
                     if citation_key not in seen_citations:
                         seen_citations.add(citation_key)
-                        expander_label = f"**Refer {ref_num}**"
-                        if heading:
-                            expander_label += f" — {heading}"
                         with st.expander(
-                            expander_label,
+                            f"**Refer {ref_num}**",
                             expanded=False,
                         ):
                             st.caption(f"{source} — Page {page}")

@@ -1,14 +1,12 @@
 """Ingestion pipeline for Railway RAG."""
 import gc
 import hashlib
-import io
 import json
 import logging
 import os
 import re
 import tempfile
 import shutil
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from typing import List, Optional, Iterator, Callable
 from datetime import datetime, timezone
@@ -53,7 +51,7 @@ MAX_PAGE_WIDTH_PT: int = 2000
 MAX_PAGE_HEIGHT_PT: int = 2000
 
 # Cache format version — bump to invalidate old contaminated caches
-CACHE_VERSION: int = 3
+CACHE_VERSION: int = 2
 
 # FAISS batch size for incremental index building (overridable via env)
 _FAISS_BATCH_SIZE_ENV = os.environ.get("FAISS_BATCH_SIZE")
@@ -74,34 +72,21 @@ def _get_file_hash(pdf_path: Path) -> str:
             hasher.update(chunk)
     return hasher.hexdigest()
 
-def _cache_key(category: str, file_hash: str) -> str:
-    return f"{category}__{file_hash}"
-
-def _save_chunks_cache(category: str, file_hash: str, jsonl_path: Path):
+def _save_chunks_cache(file_hash: str, jsonl_path: Path):
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    key = _cache_key(category, file_hash)
-    cache_path = _CACHE_DIR / f"{key}.json"
-    tmp = cache_path.with_suffix(".json.tmp")
-    with open(tmp, "w", encoding="utf-8") as out:
-        out.write('{"version": ' + str(CACHE_VERSION) + ', "chunks": [')
-        first = True
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                if not first:
-                    out.write(",")
-                out.write(line)
-                first = False
-        out.write("]}")
-    tmp.replace(cache_path)
-    page_dir = _CACHE_DIR / f"{key}.pages"
+    cache_path = _CACHE_DIR / f"{file_hash}.json"
+    chunks = list(_iter_jsonl(jsonl_path))
+    data = {
+        "version": CACHE_VERSION,
+        "chunks": chunks,
+    }
+    cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    page_dir = _CACHE_DIR / f"{file_hash}.pages"
     if page_dir.is_dir():
         shutil.rmtree(page_dir, ignore_errors=True)
 
-def _load_chunks_cache(category: str, file_hash: str) -> Optional[List[Document]]:
-    cache_path = _CACHE_DIR / f"{_cache_key(category, file_hash)}.json"
+def _load_chunks_cache(file_hash: str) -> Optional[List[Document]]:
+    cache_path = _CACHE_DIR / f"{file_hash}.json"
     if not cache_path.exists():
         return None
     try:
@@ -113,26 +98,20 @@ def _load_chunks_cache(category: str, file_hash: str) -> Optional[List[Document]
         logger.warning(f"Failed to load cache from {cache_path}: {e}")
         return None
 
-def _save_page_chunks(category: str, file_hash: str, page_no: int, chunks: List[Document]):
-    page_dir = _CACHE_DIR / f"{_cache_key(category, file_hash)}.pages"
+def _save_page_chunks(file_hash: str, page_no: int, chunks: List[Document]):
+    page_dir = _CACHE_DIR / f"{file_hash}.pages"
     page_dir.mkdir(parents=True, exist_ok=True)
     path = page_dir / f"page_{page_no:04d}.json"
-    data = {"version": CACHE_VERSION, "chunks": [{"page_content": c.page_content, "metadata": c.metadata} for c in chunks]}
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    data = [{"page_content": c.page_content, "metadata": c.metadata} for c in chunks]
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-def _load_page_chunks(category: str, file_hash: str, page_no: int) -> Optional[List[Document]]:
-    path = _CACHE_DIR / f"{_cache_key(category, file_hash)}.pages" / f"page_{page_no:04d}.json"
+def _load_page_chunks(file_hash: str, page_no: int) -> Optional[List[Document]]:
+    path = _CACHE_DIR / f"{file_hash}.pages" / f"page_{page_no:04d}.json"
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return None
-        if data.get("version") != CACHE_VERSION:
-            return None
-        return [Document(page_content=d["page_content"], metadata=d["metadata"]) for d in data["chunks"]]
+        return [Document(page_content=d["page_content"], metadata=d["metadata"]) for d in data]
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning(f"Failed to load page cache {path.name}: {e}")
         return None
@@ -142,8 +121,8 @@ def read_ingest_state(category: str) -> dict:
     if state_file.exists():
         try:
             return json.loads(state_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, FileNotFoundError, KeyError) as e:
-            logger.warning("event=state_corrupted file=%s error=%s", state_file, e)
+        except Exception as e:
+            logger.warning(f"Failed to load state from {state_file}: {e}")
     return {"completed_files": [], "total_files": 0}
 
 def _write_ingest_state(category: str, state: dict):
@@ -158,13 +137,7 @@ def clear_cache(category: str, delete_chunks: bool = False):
     if state_file.exists():
         state_file.unlink()
     if delete_chunks and _CACHE_DIR.exists():
-        prefix = f"{category}__"
-        for p in _CACHE_DIR.iterdir():
-            if p.name.startswith(prefix):
-                if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    p.unlink()
+        shutil.rmtree(_CACHE_DIR, ignore_errors=True)
 
 # Temp directory for streaming pipeline
 _TMP_DIR = _BUILD_DIR / ".tmp_streaming"
@@ -288,13 +261,6 @@ class ConverterCache:
 
 _CONVERTERS = ConverterCache()
 
-_CONVERT_TIMEOUT = 300
-
-def _convert_with_timeout(converter, page_path: Path) -> DoclingDocument:
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(converter.convert, page_path)
-        return future.result(timeout=_CONVERT_TIMEOUT).document
-
 
 def _page_below_resolution_limit(page_path: Path, max_dim: int = MAX_PAGE_WIDTH_PT) -> bool:
     """Check if a PDF page is small enough for GPU processing to avoid OOM."""
@@ -304,9 +270,8 @@ def _page_below_resolution_limit(page_path: Path, max_dim: int = MAX_PAGE_WIDTH_
             return False
         w, h = doc.get_page_size(0)
         return max(w, h) <= max_dim
-    except (OSError, ValueError, pdfium.PdfiumError) as e:
-        logger.warning("event=page_resolution_failed file=%s error=%s", page_path.name, e)
-        return False
+    except Exception:
+        return True  # safe default — let GPU try
 
 
 def _convert_page(page_path: Path, page_no: int, callback: Optional[Callable] = None) -> DoclingDocument:
@@ -314,14 +279,14 @@ def _convert_page(page_path: Path, page_no: int, callback: Optional[Callable] = 
         try:
             converter = _CONVERTERS.get_gpu()
             if callback: callback(page_no, "GPU", None)
-            return _convert_with_timeout(converter, page_path)
+            return converter.convert(page_path).document
         except RuntimeError as e:
             if "out of memory" in str(e).lower() or "alloc" in str(e).lower():
                 gc.collect()
                 torch.cuda.empty_cache()
                 if callback: callback(page_no, "CPU", "OOM")
                 converter = _CONVERTERS.get_cpu()
-                return _convert_with_timeout(converter, page_path)
+                return converter.convert(page_path).document
             else:
                 raise
         except ConversionError as e:
@@ -331,27 +296,24 @@ def _convert_page(page_path: Path, page_no: int, callback: Optional[Callable] = 
                     torch.cuda.empty_cache()
                 if callback: callback(page_no, "CPU", "OOM")
                 converter = _CONVERTERS.get_cpu()
-                return _convert_with_timeout(converter, page_path)
+                return converter.convert(page_path).document
             raise
     else:
         converter = _CONVERTERS.get_cpu()
         if callback: callback(page_no, "CPU", None)
-        return _convert_with_timeout(converter, page_path)
+        return converter.convert(page_path).document
 
 def _convert_page_force_ocr(page_path: Path, page_no: int, callback: Optional[Callable] = None) -> DoclingDocument:
     if HAS_CUDA and _page_below_resolution_limit(page_path):
         try:
             converter = _CONVERTERS.get_gpu_ocr()
             if callback: callback(page_no, "GPU", None)
-            return _convert_with_timeout(converter, page_path)
+            return converter.convert(page_path).document
         except RuntimeError as e:
             if "out of memory" in str(e).lower() or "alloc" in str(e).lower():
                 logger.warning("event=gpu_ocr_oom page=%d", page_no)
                 gc.collect()
                 torch.cuda.empty_cache()
-                if callback: callback(page_no, "CPU", "OOM")
-                converter = _CONVERTERS.get_cpu_ocr()
-                return _convert_with_timeout(converter, page_path)
             else:
                 raise
         except ConversionError as e:
@@ -362,11 +324,11 @@ def _convert_page_force_ocr(page_path: Path, page_no: int, callback: Optional[Ca
                     torch.cuda.empty_cache()
                 if callback: callback(page_no, "CPU", "OOM")
                 converter = _CONVERTERS.get_cpu_ocr()
-                return _convert_with_timeout(converter, page_path)
+                return converter.convert(page_path).document
             raise
     converter = _CONVERTERS.get_cpu_ocr()
     if callback: callback(page_no, "CPU", None)
-    return _convert_with_timeout(converter, page_path)
+    return converter.convert(page_path).document
 
 def _should_trigger_ocr_fallback(page_text: str) -> bool:
     if len(page_text) < OCR_MIN_TEXT_LEN and not re.search(r"[A-Za-z0-9]", page_text):
@@ -384,7 +346,7 @@ try:
         chunk_overlap=CHUNK_OVERLAP_TOKENS,
         length_function=_token_length,
     )
-except (TypeError, KeyError):
+except TypeError:
     GLOBAL_SPLITTER = MarkdownTextSplitter(
         chunk_size=CHUNK_SIZE_CHARS,
         chunk_overlap=CHUNK_OVERLAP_CHARS,
@@ -412,7 +374,6 @@ def extract_chunks(doc: _MergedDocument, filename: str, category: str) -> List[D
                 "source": filename,
                 "page_number": buffer_page_no,
                 "category": category,
-                "heading": current_heading,
                 "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
                 "is_table": False,
                 "is_table_continuation": False,
@@ -439,7 +400,6 @@ def extract_chunks(doc: _MergedDocument, filename: str, category: str) -> List[D
                     "source": filename,
                     "page_number": last_known_page,
                     "category": category,
-                    "heading": heading_text,
                     "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
                     "is_table": False,
                     "is_table_continuation": False,
@@ -466,7 +426,6 @@ def extract_chunks(doc: _MergedDocument, filename: str, category: str) -> List[D
                 "source": filename,
                 "page_number": page_no,
                 "category": category,
-                "heading": current_heading,
                 "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
                 "is_table": True,
                 "is_table_continuation": is_continuation,
@@ -504,7 +463,7 @@ def _count_jsonl_lines(path: Path) -> int:
     return count
 
 
-def build_and_save_index(deduped_jsonl: Path, category: str, ui_callback: Optional[Callable] = None) -> tuple[Path, int]:
+def build_and_save_index(deduped_jsonl: Path, category: str, ui_callback: Optional[Callable] = None) -> Path:
     """Build FAISS index by streaming chunks from a deduped JSONL file.
     Never loads more than one batch into RAM."""
     batch_size = FAISS_BATCH_SIZE
@@ -524,56 +483,31 @@ def build_and_save_index(deduped_jsonl: Path, category: str, ui_callback: Option
         logger.warning("Large corpus detected (%d chunks), this may take significant time/VRAM", total)
 
     vector_store = None
-    try:
-        embeddings = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={"device": "cuda"} if HAS_CUDA else {},
-            encode_kwargs={"normalize_embeddings": True},
-        )
-    except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
-        logger.warning("event=embedding_init_oom fallback=cpu error=%s", e)
-        batch_size = max(batch_size // 2, 50)
-        embeddings = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
-        )
-
-    def _embed_batch(batch_docs, vs):
-        try:
-            if vs is None:
-                return FAISS.from_documents(batch_docs, embeddings)
-            vs.add_documents(batch_docs)
-            return vs
-        except (RuntimeError, torch.cuda.OutOfMemoryError):
-            logger.warning("event=embedding_batch_oom batch_size=%d fallback=cpu", len(batch_docs))
-            cpu_embeddings = HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL,
-                model_kwargs={"device": "cpu"},
-                encode_kwargs={"normalize_embeddings": True},
-            )
-            if vs is None:
-                return FAISS.from_documents(batch_docs, cpu_embeddings)
-            cpu_index = FAISS.from_documents(batch_docs, cpu_embeddings)
-            vs.merge_from(cpu_index)
-            return vs
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs={"device": "cuda"} if HAS_CUDA else {},
+        encode_kwargs={"normalize_embeddings": True},
+    )
 
     batch: list[Document] = []
     processed = 0
     for chunk_dict in _iter_jsonl(deduped_jsonl):
         batch.append(Document(page_content=chunk_dict["page_content"], metadata=chunk_dict["metadata"]))
         if len(batch) >= batch_size:
-            vector_store = _embed_batch(batch, vector_store)
+            if vector_store is None:
+                vector_store = FAISS.from_documents(batch, embeddings)
+            else:
+                vector_store.add_documents(batch)
             processed += len(batch)
             if ui_callback:
                 ui_callback("INDEX_PROGRESS", None, processed, total)
             batch = []
 
     if batch:
-        vector_store = _embed_batch(batch, vector_store)
-        processed += len(batch)
-        if ui_callback:
-            ui_callback("INDEX_PROGRESS", None, processed, total)
+        if vector_store is None:
+            vector_store = FAISS.from_documents(batch, embeddings)
+        else:
+            vector_store.add_documents(batch)
 
     index_dir = _BUILD_DIR / f"{category}_index"
     os.makedirs(str(index_dir), exist_ok=True)
@@ -589,7 +523,7 @@ def build_and_save_index(deduped_jsonl: Path, category: str, ui_callback: Option
     if HAS_CUDA:
         torch.cuda.empty_cache()
 
-    return index_dir, total
+    return index_dir
 
 def _build_bm25_corpus(input_jsonl: Path, output_path: Path):
     """Stream-read deduped JSONL, write BM25 corpus JSON array.
@@ -609,11 +543,6 @@ def _build_bm25_corpus(input_jsonl: Path, output_path: Path):
                 out.write("," + obj)
         out.write("]")
 
-def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Callable] = None) -> dict:
-    all_chunks: List[Document] = []
-    
-    state = read_ingest_state(category)
-    completed_files = set(state.get("completed_files", []))
 
 def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Callable] = None) -> dict:
     session_dir = _TMP_DIR / f"session_{category}"
@@ -627,8 +556,7 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
 
     total_pages_overall = 0
     file_page_counts = {}
-    skipped = set()
-    for idx, p_path_str in enumerate(pdf_paths):
+    for p_path_str in pdf_paths:
         p_path = Path(p_path_str)
         try:
             r = pypdf.PdfReader(p_path)
@@ -637,9 +565,6 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
             file_page_counts[p_path.name] = cnt
         except (pypdf.errors.PdfReadError, OSError) as e:
             logger.warning(f"Skipping unreadable file {p_path.name}: {e}")
-            skipped.add(p_path_str)
-            if ui_callback:
-                ui_callback("FILE_SKIP", p_path.name, idx + 1, len(pdf_paths))
             continue
 
     if ui_callback:
@@ -648,28 +573,35 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
     jsonl_paths: list[Path] = []
 
     for idx, pdf_path_str in enumerate(pdf_paths):
-        if pdf_path_str in skipped:
-            continue
         pdf_path = Path(pdf_path_str)
         filename = pdf_path.name
+
+        try:
+            r_check = pypdf.PdfReader(pdf_path)
+            _ = len(r_check.pages)
+        except pypdf.errors.PdfReadError:
+            logger.error(f"Corrupt PDF, skipping: {filename}")
+            if ui_callback:
+                ui_callback("FILE_SKIP", filename, idx + 1, len(pdf_paths))
+            continue
 
         file_hash = _get_file_hash(pdf_path)
         jsonl_path = chunks_dir / f"{file_hash}.jsonl"
 
-        cached = _load_chunks_cache(category, file_hash)
+        cached = _load_chunks_cache(file_hash)
         if cached is not None:
             for c in cached:
                 if c.metadata.get("category") != category:
                     c.metadata = {**c.metadata, "category": category}
             _write_chunks_jsonl(jsonl_path, cached)
             jsonl_paths.append(jsonl_path)
-            completed_files.add(file_hash)
+            completed_files.add(filename)
             _write_ingest_state(category, {"completed_files": list(completed_files), "total_files": len(pdf_paths)})
             if ui_callback:
                 ui_callback("FILE_CACHED", filename, idx + 1, len(pdf_paths))
             continue
-        elif file_hash in completed_files:
-            completed_files.remove(file_hash)
+        elif filename in completed_files:
+            completed_files.remove(filename)
 
         if ui_callback:
             ui_callback("FILE_START", filename, idx + 1, len(pdf_paths))
@@ -687,12 +619,12 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
                     if ui_callback:
                         ui_callback("PAGE_PROG", filename, p_no, total_pages, dev, warn)
 
-                cached_chunks = _load_page_chunks(category, file_hash, page_no)
+                cached_chunks = _load_page_chunks(file_hash, page_no)
                 if cached_chunks is not None:
                     _write_chunks_jsonl(jsonl_path, cached_chunks)
                     restored_pages += 1
                     if ui_callback:
-                        ui_callback("PAGE_DONE", filename, page_no, total_pages, "checkpoint", "Restored")
+                        ui_callback("PAGE_PROG", filename, page_no, total_pages, "checkpoint", "Restored")
                     continue
 
                 try:
@@ -707,18 +639,14 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
                     page_merged = _MergedDocument()
                     page_merged.add_page_doc(doc_page, page_no)
                     page_chunks = extract_chunks(page_merged, filename, category)
-                    _save_page_chunks(category, file_hash, page_no, page_chunks)
+                    _save_page_chunks(file_hash, page_no, page_chunks)
                     _write_chunks_jsonl(jsonl_path, page_chunks)
-                    if ui_callback:
-                        ui_callback("PAGE_DONE", filename, page_no, total_pages)
                 except (RuntimeError, ConversionError) as e:
                     if "std::bad_alloc" in str(e) or "out of memory" in str(e).lower():
                         logger.error("OOM on page %d of %s — skipping", page_no, filename)
                         gc.collect()
                         if HAS_CUDA:
                             torch.cuda.empty_cache()
-                        if ui_callback:
-                            ui_callback("PAGE_SKIP", filename, page_no, total_pages)
                         continue
                     raise
         finally:
@@ -732,9 +660,9 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
         if ui_callback:
             ui_callback("FILE_CHUNKING", filename, idx + 1, len(pdf_paths))
 
-        _save_chunks_cache(category, file_hash, jsonl_path)
+        _save_chunks_cache(file_hash, jsonl_path)
 
-        completed_files.add(file_hash)
+        completed_files.add(filename)
         _write_ingest_state(category, {"completed_files": list(completed_files), "total_files": len(pdf_paths)})
 
     if not jsonl_paths:
@@ -751,12 +679,14 @@ def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Calla
     if ui_callback:
         ui_callback("BUILDING_INDEX", None, 0, 0)
 
-    index_dir, chunk_count = build_and_save_index(deduped_path, category, ui_callback=ui_callback)
+    index_dir = build_and_save_index(deduped_path, category, ui_callback=ui_callback)
 
     corpus_path = index_dir / "bm25_corpus.json"
     _build_bm25_corpus(deduped_path, corpus_path)
 
+    chunk_count = _count_jsonl_lines(deduped_path)
     shutil.rmtree(session_dir, ignore_errors=True)
+    clear_cache(category, delete_chunks=True)
     gc.collect()
 
     return {"chunk_count": chunk_count, "category": category}
