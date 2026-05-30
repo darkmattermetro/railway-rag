@@ -6,6 +6,7 @@ Runs within ~1 GB RAM constraint on Streamlit Cloud.
 """
 
 import hashlib
+import json
 import logging
 import os
 import random
