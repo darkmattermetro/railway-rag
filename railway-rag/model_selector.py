@@ -97,7 +97,7 @@ class ModelSelector:
     # ------------------------------------------------------------------
 
     def _is_model_available(self, model_name: str) -> bool:
-        """Check if a model is available (not exhausted or in cooldown)"""
+        """"Check if a model is available (not exhausted or in cooldown)"""
         state = self.model_states.get(model_name)
         if not state:
             return False

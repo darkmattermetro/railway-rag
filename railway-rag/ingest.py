@@ -1,6 +1,7 @@
 """Ingestion pipeline for Railway RAG."""
 import gc
 import hashlib
+import io
 import json
 import logging
 import os
@@ -509,6 +510,9 @@ def _check_incremental_possible(index_dir: Path) -> tuple[bool, str | None]:
         return False, "no_index_dir"
     meta_file = index_dir / "build_meta.json"
     if not meta_file.exists():
+        model_file = index_dir / "embedding_model.txt"
+        if model_file.exists() and model_file.read_text().strip() == EMBEDDING_MODEL:
+            return True, None
         return False, "no_build_meta"
     try:
         meta = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -778,7 +782,6 @@ def _build_bm25_corpus(input_jsonl: Path, output_path: Path):
             else:
                 out.write("," + obj)
         out.write("]")
-
 
 def ingest_pdfs(pdf_paths: list[str], category: str, ui_callback: Optional[Callable] = None) -> dict:
     session_dir = _TMP_DIR / f"session_{category}"

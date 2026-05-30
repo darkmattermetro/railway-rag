@@ -71,15 +71,27 @@ def main() -> None:
         completed_count = len(state["completed_files"])
         total_files = state.get("total_files", 0)
         index_dir = Path("vector_indices") / f"{safe_category}_index"
+        index_exists = index_dir.is_dir()
+        new_count = len(uploaded_hashes - completed)
         all_done = completed_count >= total_files > 0
-        build_failed = all_done and not index_dir.is_dir()
+        build_failed = all_done and not index_exists
         if build_failed:
             st.sidebar.warning(
                 f"⚠ All {completed_count} files chunked, but the index build failed. "
                 "Resume to retry the indexing step."
             )
+        elif index_exists and new_count > 0:
+            st.sidebar.info(
+                f"Adding {new_count} new file(s) to existing {safe_category} index "
+                f"({completed_count} files already indexed)."
+            )
+        elif index_exists:
+            st.sidebar.info(
+                f"All {completed_count} files already indexed. "
+                "Re-running to catch any new content."
+            )
         else:
-            st.sidebar.warning(f"⚠ Incomplete session detected ({completed_count} files completed).")
+            st.sidebar.warning(f"⚠ Incomplete session detected ({completed_count}/{total_files} files completed).")
         
         if st.sidebar.button("Start Fresh"):
             clear_cache(safe_category, delete_chunks=True)

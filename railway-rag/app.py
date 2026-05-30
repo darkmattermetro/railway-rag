@@ -662,7 +662,7 @@ def main() -> None:
                 final_indices = []
 
             # Display the answer
-            response_placeholder.markdown(display_response)
+            response_placeholder.markdown(display_response, unsafe_allow_html=True)
 
             # Render LLM-tagged citations with expandable chunk text
             seen_citations: set[str] = set()
