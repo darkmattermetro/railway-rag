@@ -18,6 +18,7 @@ vector_indices/*
 !vector_indices/SPECIAL_INSTRUCTIONS_index/
 !vector_indices/Safety_Circular_index/
 !vector_indices/RS10_index/
+!vector_indices/SOP_OCC_index/
 
 # CodeGraph AI cache
 .codegraph/
