@@ -666,13 +666,14 @@ def main() -> None:
 
             # Render LLM-tagged citations with expandable chunk text
             seen_citations: set[str] = set()
-            ref_num = 1  # Reference counter starting at 1
+            ref_num = 1
             for idx in final_indices:
                 if 0 <= idx < len(reranked_docs):
                     doc = reranked_docs[idx]
                     source: str = doc.metadata.get("source", "unknown")
                     page: str = str(doc.metadata.get("page_number", "?"))
                     heading: str = doc.metadata.get("heading", "")
+                    is_table: bool = doc.metadata.get("is_table", False)
                     citation_key: str = f"{source}:{page}"
                     if citation_key not in seen_citations:
                         seen_citations.add(citation_key)
@@ -683,8 +684,11 @@ def main() -> None:
                             expander_label,
                             expanded=False,
                         ):
-                            st.caption(f"{source} — Page {page}")
-                            st.text(doc.page_content)
+                            badges = f"📄 {source}  ·  📄 Page {page}"
+                            if is_table:
+                                badges += "  ·  `TABLE`"
+                            st.caption(badges)
+                            st.markdown(doc.page_content)
                         ref_num += 1
 
             logger.info(

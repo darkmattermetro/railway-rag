@@ -25,6 +25,8 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_script_run
 from config import CATEGORY_MAX_LEN, MAX_FILE_SIZE_BYTES
 from ingest import ingest_pdfs, clear_cache, read_ingest_state
 
+logger = logging.getLogger(__name__)
+
 def main() -> None:
     st.set_page_config(
         page_title="Railway RAG Builder",
