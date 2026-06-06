@@ -16,6 +16,13 @@ class LLMExhaustedError(Exception):
     """Raised when all available LLM providers are exhausted"""
     pass
 
+class RateLimitWarning(Exception):
+    """Raised when approaching provider rate limits"""
+    def __init__(self, provider: str, retry_after: float):
+        self.provider = provider
+        self.retry_after = retry_after
+        super().__init__(f"{provider} rate limit near: retry in {retry_after:.0f}s")
+
 class ModelSelector:
     """
     Intelligent model selector that rotates through available models and API keys
@@ -91,6 +98,7 @@ class ModelSelector:
                 }
 
         self.last_provider: Optional[str] = None
+        self.session_state = session_state
 
     # ------------------------------------------------------------------
     # Model state helpers
@@ -192,6 +200,41 @@ class ModelSelector:
         quota_indicators = ['quota', 'rate_limit', 'ratelimit']
         return any(i in error_str for i in quota_indicators)
 
+    def _check_and_record_call(self, provider: str) -> None:
+        """Proactive rate limit check before making an LLM call.
+        Raises RateLimitWarning if within 2 calls of hitting RPM/RPD limits.
+        """
+        if not self.session_state:
+            return
+
+        rl_key = f"rl_timestamps_{provider}"
+        if rl_key not in self.session_state:
+            self.session_state[rl_key] = []
+
+        now = time.time()
+        timestamps = self.session_state[rl_key]
+        rpm_limits = {"gemini": 15, "groq": 30}
+        rpd_limits = {"gemini": 1500, "groq": 14400}
+        rpm = rpm_limits.get(provider, 15)
+        rpd = rpd_limits.get(provider, 1500)
+
+        cutoff_60s = now - 60
+        cutoff_24h = now - 86400
+        recent_60s = [t for t in timestamps if t > cutoff_60s]
+        recent_24h = [t for t in timestamps if t > cutoff_24h]
+
+        rpm_remaining = rpm - len(recent_60s)
+        rpd_remaining = rpd - len(recent_24h)
+
+        if rpm_remaining <= 2:
+            retry_after = max(1, 60 - (now - (recent_60s[0] if recent_60s else now)))
+            raise RateLimitWarning(provider, retry_after)
+        if rpd_remaining <= 2:
+            raise RateLimitWarning(provider, 60)
+
+        timestamps.append(now)
+        self.session_state[rl_key] = [t for t in timestamps if t > cutoff_24h]
+
     # ------------------------------------------------------------------
     # LLM instance factory
     # ------------------------------------------------------------------
@@ -231,6 +274,12 @@ class ModelSelector:
         ordered_providers = providers[shift:] + providers[:shift]
 
         for provider in ordered_providers:
+            try:
+                self._check_and_record_call(provider)
+            except RateLimitWarning as rlw:
+                logger.warning(f"event=rate_limit_avoided provider={rlw.provider} retry_after={rlw.retry_after:.0f}")
+                continue
+
             keys_exhausted = False
             while True:
                 model_name = self._get_next_available_model(provider)
@@ -295,6 +344,12 @@ class ModelSelector:
         ordered_providers = providers[shift:] + providers[:shift]
 
         for provider in ordered_providers:
+            try:
+                self._check_and_record_call(provider)
+            except RateLimitWarning as rlw:
+                logger.warning(f"event=rate_limit_avoided provider={rlw.provider} retry_after={rlw.retry_after:.0f}")
+                continue
+
             keys_exhausted = False
             while True:
                 model_name = self._get_next_available_model(provider)

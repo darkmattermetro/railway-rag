@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
-RETRIEVAL_K: int = 20
+RETRIEVAL_K: int = 10
 FAISS_SIM_THRESHOLD: float = 0.35
 MAX_CONTEXT_TOKENS: int = 3500
 RESERVE_TOKENS: int = 500
