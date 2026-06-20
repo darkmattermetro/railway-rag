@@ -299,12 +299,12 @@ def load_bm25_index(index_path: str):
     from rank_bm25 import BM25Okapi
     with open(corpus_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
-    # RAM cap: enforce max 15k entries / ~40 MB
-    if len(entries) > 15000:
+    # RAM cap: enforce max 10k entries / ~25 MB on 1 GB budget
+    if len(entries) > 10000:
         logger.warning(
-            "event=bm25_corpus_capped entries=%d max=15000", len(entries),
+            "event=bm25_corpus_capped entries=%d max=10000", len(entries),
         )
-        entries = entries[:15000]
+        entries = entries[:10000]
     texts = [e["text"] for e in entries]
     tokenized = [text.lower().split() for text in texts]
     bm25 = BM25Okapi(tokenized)
@@ -653,7 +653,7 @@ def writer_agent(
         logger.error("event=llm_all_providers_exhausted")
         return None
     except Exception as e:
-        logger.warning("event=writer_llm_failed error=%s", e)
+        logger.exception("event=writer_llm_failed error=%s", e)
         return None
 
     return full_response
@@ -1058,6 +1058,7 @@ def main() -> None:
         # ----------------------------------------------------------------
 
         with st.chat_message("assistant"):
+            _log_memory_snapshot("before_pipeline")
             response_placeholder = st.empty()
             response_placeholder.markdown(
                 '<div class="status-msg">🔍 Analyzing query...</div>',
